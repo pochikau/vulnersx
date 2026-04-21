@@ -167,21 +167,6 @@ th {
   font-size: 0.72rem;
 }
 
-tr.row-new td {
-  background: rgba(255, 51, 85, 0.12);
-  border-left: 3px solid var(--danger);
-}
-
-tr.row-in_progress td {
-  background: rgba(255, 212, 71, 0.1);
-  border-left: 3px solid var(--warn);
-}
-
-tr.row-closed td {
-  background: rgba(57, 255, 140, 0.08);
-  border-left: 3px solid var(--ok);
-}
-
 .small {
   font-size: 0.78rem;
   color: var(--muted);
@@ -219,4 +204,130 @@ tr.row-closed td {
 
 .mono {
   font-family: var(--font);
+}
+
+/* Vulnerability cards (aligned with old_data readability) */
+.vuln-section .vuln-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.vuln-card {
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.28);
+  padding: 14px 16px;
+  border-radius: 2px;
+}
+
+.vuln-card.status-new {
+  border-left: 4px solid var(--danger);
+  box-shadow: 0 0 0 1px rgba(255, 51, 85, 0.15);
+}
+
+.vuln-card.status-in_progress {
+  border-left: 4px solid var(--warn);
+  box-shadow: 0 0 0 1px rgba(255, 212, 71, 0.12);
+}
+
+.vuln-card.status-closed {
+  border-left: 4px solid var(--ok);
+  box-shadow: 0 0 0 1px rgba(57, 255, 140, 0.1);
+}
+
+.vuln-card-head {
+  margin-bottom: 10px;
+}
+
+.vuln-card-titles {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.vuln-cve {
+  color: var(--neon);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.vuln-sev {
+  font-size: 0.72rem;
+  letter-spacing: 0.1em;
+  padding: 2px 8px;
+  border: 1px solid currentColor;
+}
+
+.vuln-sev.sev-critical {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.vuln-sev.sev-high {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.vuln-sev.sev-unknown {
+  color: var(--muted);
+  border-color: rgba(125, 168, 154, 0.4);
+}
+
+.vuln-sw {
+  font-size: 0.85rem;
+  color: var(--neon2);
+}
+
+.vuln-name {
+  margin: 0;
+  font-size: 0.95rem;
+  color: var(--text);
+  line-height: 1.45;
+}
+
+.vuln-summary {
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.8rem;
+  line-height: 1.55;
+  color: #c8f7ee;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(0, 255, 213, 0.2);
+  font-family: var(--font);
+}
+
+.vuln-json {
+  margin-bottom: 12px;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.vuln-json summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.vuln-json-pre {
+  margin-top: 8px;
+  padding: 10px;
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 0.72rem;
+  background: rgba(0, 0, 0, 0.5);
+  border: 1px solid rgba(0, 255, 213, 0.12);
+}
+
+.vuln-actions {
+  margin-top: 4px;
+  align-items: flex-end;
+}
+
+.vuln-actions input[type="text"] {
+  min-width: 200px;
 }

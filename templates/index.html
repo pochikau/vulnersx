@@ -117,42 +117,49 @@
       </form>
     </section>
 
-    <section class="panel">
+    <section class="panel vuln-section">
       <h2>Найденные уязвимости</h2>
       {% if findings %}
-      <div style="overflow-x:auto;">
-        <table>
-          <thead>
-            <tr>
-              <th>CVE</th>
-              <th>ПО</th>
-              <th>Серьёзность</th>
-              <th>Заголовок</th>
-              <th>Управление</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for f in findings %}
-            <tr class="row-{{ f.status }}">
-              <td class="mono">{{ f.cve_id }}</td>
-              <td>{{ f.software_name }}</td>
-              <td>{{ f.severity or "—" }}</td>
-              <td>{{ f.title or "—" }}</td>
-              <td>
-                <form method="post" action="/finding/{{ f.id }}/update" class="stack">
-                  <select name="status">
-                    <option value="new" {% if f.status == 'new' %}selected{% endif %}>Новая</option>
-                    <option value="in_progress" {% if f.status == 'in_progress' %}selected{% endif %}>В работе</option>
-                    <option value="closed" {% if f.status == 'closed' %}selected{% endif %}>Закрыто</option>
-                  </select>
-                  <input type="text" name="comment" value="{{ f.comment or '' }}" placeholder="Комментарий, напр. vulnm-1234" />
-                  <button type="submit">Сохранить</button>
-                </form>
-              </td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
+      <div class="vuln-list">
+        {% for f in findings %}
+        <article class="vuln-card status-{{ f.status }}">
+          <header class="vuln-card-head">
+            <div class="vuln-card-titles">
+              <span class="vuln-cve mono">{{ f.cve_id }}</span>
+              <span class="vuln-sev sev-{{ (f.severity or 'unknown')|lower }}">{{ (f.severity or "?")|upper }}</span>
+              <span class="vuln-sw">{{ f.software_name }}</span>
+            </div>
+            <p class="vuln-name">{{ f.title or "—" }}</p>
+          </header>
+          {% if f.summary %}
+          <pre class="vuln-summary" role="text">{{ f.summary }}</pre>
+          {% endif %}
+          {% if f.detail_json %}
+          <details class="vuln-json">
+            <summary>Сырой JSON (API)</summary>
+            <pre class="vuln-json-pre mono">{{ f.detail_json }}</pre>
+          </details>
+          {% endif %}
+          <form method="post" action="/finding/{{ f.id }}/update" class="vuln-actions inline-form">
+            <div>
+              <label>Статус</label>
+              <select name="status">
+                <option value="new" {% if f.status == 'new' %}selected{% endif %}>Новая</option>
+                <option value="in_progress" {% if f.status == 'in_progress' %}selected{% endif %}>В работе</option>
+                <option value="closed" {% if f.status == 'closed' %}selected{% endif %}>Закрыто</option>
+              </select>
+            </div>
+            <div>
+              <label>Комментарий</label>
+              <input type="text" name="comment" value="{{ f.comment or '' }}" placeholder="vulnm-1234" />
+            </div>
+            <div>
+              <label>&nbsp;</label>
+              <button type="submit">Сохранить</button>
+            </div>
+          </form>
+        </article>
+        {% endfor %}
       </div>
       {% else %}
       <p class="small">Пока нет записей — выполните скан или ослабьте фильтры.</p>

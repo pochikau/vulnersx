@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import json
 import os
 import subprocess
 from urllib.parse import quote
@@ -83,6 +84,7 @@ def execute_scan(vuln_age_days: int) -> tuple[int | None, str | None]:
                         title=hit.title,
                         severity=hit.severity,
                         summary=hit.summary,
+                        detail_json=json.dumps(hit.detail, ensure_ascii=False) if hit.detail else None,
                         scan_run_id=run_id,
                     )
                     if kind == "inserted":
@@ -282,6 +284,9 @@ async def export_csv(
             "software",
             "severity",
             "title",
+            "cvss_score",
+            "epss_score",
+            "age_in_days",
             "status",
             "comment",
             "first_seen_scan_id",
@@ -290,12 +295,28 @@ async def export_csv(
         ]
     )
     for r in rows:
+        cvss = epss = age = ""
+        dj = r["detail_json"] if "detail_json" in r.keys() else None
+        if dj:
+            try:
+                d = json.loads(dj)
+                if d.get("cvss_score") is not None:
+                    cvss = str(d["cvss_score"])
+                if d.get("epss_score") is not None:
+                    epss = str(d["epss_score"])
+                if d.get("age_in_days") is not None:
+                    age = str(d["age_in_days"])
+            except (json.JSONDecodeError, TypeError, KeyError):
+                pass
         w.writerow(
             [
                 r["cve_id"],
                 r["software_name"],
                 r["severity"] or "",
                 r["title"] or "",
+                cvss,
+                epss,
+                age,
                 r["status"],
                 r["comment"] or "",
                 r["first_seen_scan_id"],

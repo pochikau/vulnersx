@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS findings (
     last_seen_scan_id INTEGER NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    detail_json TEXT,
     UNIQUE (cve_id, software_id),
     FOREIGN KEY (software_id) REFERENCES software(id),
     FOREIGN KEY (first_seen_scan_id) REFERENCES scan_runs(id),
@@ -76,9 +77,16 @@ def connect(db_path: Path) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+def _migrate_findings_columns(conn: sqlite3.Connection) -> None:
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(findings)").fetchall()}
+    if "detail_json" not in cols:
+        conn.execute("ALTER TABLE findings ADD COLUMN detail_json TEXT")
+
+
 def init_db(db_path: Path) -> None:
     with connect(db_path) as conn:
         conn.executescript(SCHEMA)
+        _migrate_findings_columns(conn)
         cur = conn.execute("SELECT COUNT(*) FROM settings WHERE key = 'scan_interval_minutes'")
         if cur.fetchone()[0] == 0:
             conn.execute(
@@ -193,6 +201,7 @@ def upsert_finding(
     title: str | None,
     severity: str | None,
     summary: str | None,
+    detail_json: str | None,
     scan_run_id: int,
 ) -> str:
     """Returns 'inserted' or 'updated'."""
@@ -206,11 +215,22 @@ def upsert_finding(
         conn.execute(
             """
             INSERT INTO findings (
-                cve_id, software_id, title, severity, summary, status, comment,
+                cve_id, software_id, title, severity, summary, detail_json, status, comment,
                 first_seen_scan_id, last_seen_scan_id, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, 'new', NULL, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, 'new', NULL, ?, ?, ?, ?)
             """,
-            (cve_id, software_id, title, severity, summary, scan_run_id, scan_run_id, now, now),
+            (
+                cve_id,
+                software_id,
+                title,
+                severity,
+                summary,
+                detail_json,
+                scan_run_id,
+                scan_run_id,
+                now,
+                now,
+            ),
         )
         return "inserted"
     conn.execute(
@@ -219,11 +239,12 @@ def upsert_finding(
             title = COALESCE(?, title),
             severity = COALESCE(?, severity),
             summary = COALESCE(?, summary),
+            detail_json = COALESCE(?, detail_json),
             last_seen_scan_id = ?,
             updated_at = ?
         WHERE id = ?
         """,
-        (title, severity, summary, scan_run_id, now, int(row["id"])),
+        (title, severity, summary, detail_json, scan_run_id, now, int(row["id"])),
     )
     return "updated"
 
