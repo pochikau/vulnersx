@@ -7,7 +7,6 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
-import json
 import os
 import subprocess
 from urllib.parse import quote
@@ -84,7 +83,11 @@ def execute_scan(vuln_age_days: int) -> tuple[int | None, str | None]:
                         title=hit.title,
                         severity=hit.severity,
                         summary=hit.summary,
-                        detail_json=json.dumps(hit.detail, ensure_ascii=False) if hit.detail else None,
+                        raw_output=hit.raw_output,
+                        cvss_score=hit.cvss_score,
+                        epss_score=hit.epss_score,
+                        vuln_age_days=hit.vuln_age_days,
+                        severity_rank=hit.severity_rank,
                         scan_run_id=run_id,
                     )
                     if kind == "inserted":
@@ -154,6 +157,8 @@ async def dashboard(
     scan_run: int | None = None,
     only_new: str | None = None,
     error: str | None = None,
+    sort: str = "cvss",
+    order: str = "desc",
 ) -> Any:
     with db.connect(DB_PATH) as conn:
         sw = db.list_software(conn)
@@ -162,6 +167,7 @@ async def dashboard(
         scans = db.list_recent_scans(conn, 25)
         latest = db.latest_completed_scan(conn)
         latest_scan_id = int(latest["id"]) if latest else None
+        stats = db.count_findings_by_status(conn)
 
         only_id: int | None = None
         effective_scan = scan_run if scan_run is not None else latest_scan_id
@@ -173,7 +179,20 @@ async def dashboard(
             q=q,
             status=status if status else None,
             only_new_from_scan=only_id,
+            sort_by=sort,
+            sort_order=order,
         )
+
+        last_scan_label = "NEVER"
+        if scans:
+            last_scan_label = str(scans[0]["started_at"])
+
+        if stats["new"] > 50:
+            threat_level, threat_class = "CRITICAL", "threat-hot"
+        elif stats["new"] > 0:
+            threat_level, threat_class = "ELEVATED", "threat-warn"
+        else:
+            threat_level, threat_class = "MONITORING", "threat-ok"
 
     return TEMPLATES.TemplateResponse(
         "index.html",
@@ -190,6 +209,12 @@ async def dashboard(
             "scan_interval_minutes": interval,
             "scan_vuln_age_days": age_default,
             "page_error": error,
+            "sort": sort,
+            "order": order,
+            "stats": stats,
+            "last_scan_label": last_scan_label,
+            "threat_level": threat_level,
+            "threat_class": threat_class,
         },
     )
 
@@ -242,15 +267,22 @@ async def software_upload(file: UploadFile = File(...)) -> RedirectResponse:
     return RedirectResponse(url="/", status_code=303)
 
 
+def _safe_next(url: str | None) -> str:
+    if not url or not url.startswith("/") or url.startswith("//"):
+        return "/"
+    return url.split("#", 1)[0]
+
+
 @app.post("/finding/{finding_id}/update")
 async def finding_update(
     finding_id: int,
     status: str = Form(...),
     comment: str = Form(""),
+    next: str = Form("/"),
 ) -> RedirectResponse:
     with db.connect(DB_PATH) as conn:
         db.update_finding_status(conn, finding_id, status, comment.strip() or None)
-    return RedirectResponse(url="/", status_code=303)
+    return RedirectResponse(url=_safe_next(next), status_code=303)
 
 
 @app.get("/export.csv")
@@ -259,6 +291,8 @@ async def export_csv(
     status: str | None = None,
     scan_run: int | None = None,
     only_new: str | None = None,
+    sort: str = "cvss",
+    order: str = "desc",
 ) -> StreamingResponse:
     only_id: int | None = None
     with db.connect(DB_PATH) as conn:
@@ -274,6 +308,8 @@ async def export_csv(
             q=q,
             status=status if status else None,
             only_new_from_scan=only_id,
+            sort_by=sort,
+            sort_order=order,
         )
 
     buf = io.StringIO()
@@ -286,39 +322,28 @@ async def export_csv(
             "title",
             "cvss_score",
             "epss_score",
-            "age_in_days",
+            "vuln_age_days",
             "status",
             "comment",
+            "raw_output",
             "first_seen_scan_id",
             "last_seen_scan_id",
             "updated_at",
         ]
     )
     for r in rows:
-        cvss = epss = age = ""
-        dj = r["detail_json"] if "detail_json" in r.keys() else None
-        if dj:
-            try:
-                d = json.loads(dj)
-                if d.get("cvss_score") is not None:
-                    cvss = str(d["cvss_score"])
-                if d.get("epss_score") is not None:
-                    epss = str(d["epss_score"])
-                if d.get("age_in_days") is not None:
-                    age = str(d["age_in_days"])
-            except (json.JSONDecodeError, TypeError, KeyError):
-                pass
         w.writerow(
             [
                 r["cve_id"],
                 r["software_name"],
                 r["severity"] or "",
                 r["title"] or "",
-                cvss,
-                epss,
-                age,
+                r["cvss_score"] if r["cvss_score"] is not None else "",
+                r["epss_score"] if r["epss_score"] is not None else "",
+                r["vuln_age_days"] if r["vuln_age_days"] is not None else "",
                 r["status"],
                 r["comment"] or "",
+                r["raw_output"] or "",
                 r["first_seen_scan_id"],
                 r["last_seen_scan_id"],
                 r["updated_at"],

@@ -1,200 +1,193 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>VULNX · SOC</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VULNX SECSOC · Cyberpunk Vulnerability Manager</title>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
-  <div class="wrap">
-    <header class="hero">
-      <h1>VULNX · управление уязвимостями</h1>
-      <p>Инвентарь ПО → поиск через <span class="mono">vulnx search</span> → статусы и учёт</p>
+  <div class="scanlines"></div>
+  <div class="container">
+    <header class="cyber-header">
+      <h1 class="glitch" data-text="VULNX SECSOC">VULNX SECSOC</h1>
+      <div class="status-bar">
+        <div class="status-item">SYSTEM: ONLINE</div>
+        <div class="status-item">SECURITY LEVEL: MAXIMUM</div>
+        <div class="status-item">THREAT STATUS: <span id="threat-level" class="{{ threat_class }}">{{ threat_level }}</span></div>
+        <div class="status-item">LAST SCAN: <span id="last-scan">{{ last_scan_label }}</span></div>
+      </div>
     </header>
 
     {% if page_error %}
-    <div class="alert">{{ page_error }}</div>
+    <div class="page-error">{{ page_error }}</div>
     {% endif %}
 
-    <section class="panel">
-      <h2>Инвентарь ПО</h2>
-      <div class="grid2">
-        <form class="stack" method="post" action="/software/upload" enctype="multipart/form-data">
-          <div>
-            <label>Загрузить список (как software.txt)</label>
-            <input type="file" name="file" accept=".txt,.csv,text/plain" required />
-          </div>
-          <div><button type="submit">Загрузить файл</button></div>
-        </form>
-        <form class="stack" method="post" action="/software/add">
-          <div>
-            <label>Добавить вручную</label>
-            <input type="text" name="name" placeholder="Например: Apache Tomcat" required />
-          </div>
-          <div><button type="submit">Добавить</button></div>
-        </form>
+    <div class="dashboard">
+      <div class="stats-panel">
+        <div class="stat-card">
+          <div class="stat-label">TOTAL VULNERABILITIES</div>
+          <div class="stat-value">{{ stats.total }}</div>
+        </div>
+        <div class="stat-card critical">
+          <div class="stat-label">CRITICAL (NEW)</div>
+          <div class="stat-value">{{ stats.new }}</div>
+        </div>
+        <div class="stat-card warning">
+          <div class="stat-label">IN PROGRESS</div>
+          <div class="stat-value">{{ stats.in_progress }}</div>
+        </div>
+        <div class="stat-card secure">
+          <div class="stat-label">CLOSED</div>
+          <div class="stat-value">{{ stats.closed }}</div>
+        </div>
       </div>
-      {% if software %}
-      <p class="small" style="margin-top:12px;">Записей: {{ software|length }}. Примеры: {% for s in software %}{% if loop.index <= 12 %}<span class="pill">{{ s.name }}</span>{% endif %}{% endfor %}{% if software|length > 12 %} …{% endif %}</p>
-      {% else %}
-      <p class="small" style="margin-top:12px;">Список пуст — загрузите файл или добавьте ПО.</p>
-      {% endif %}
-    </section>
 
-    <section class="panel">
-      <h2>Сканирование</h2>
-      <form method="post" action="/action/scan" class="inline-form">
-        <div>
-          <label>Возраст уязвимости (дней)</label>
-          <select name="vuln_age_days">
-            {% for d in [10, 20, 30, 60, 90, 180] %}
-            <option value="{{ d }}" {% if d|string == scan_vuln_age_days %}selected{% endif %}>{{ d }} дней</option>
-            {% endfor %}
-          </select>
-        </div>
-        <div>
-          <label>&nbsp;</label>
-          <button type="submit">Запустить скан</button>
-        </div>
-      </form>
-      <p class="small">После скана откроется вид «только новые» для последнего завершённого прогона.</p>
-    </section>
-
-    <section class="panel">
-      <h2>Таймер</h2>
-      <form method="post" action="/action/settings" class="inline-form">
-        <div>
-          <label>Интервал (минут, 0 = выкл.)</label>
-          <input type="number" name="scan_interval_minutes" min="0" value="{{ scan_interval_minutes }}" />
-        </div>
-        <div>
-          <label>Возраст для автоскана (дней)</label>
-          <input type="number" name="scan_vuln_age_days" min="1" value="{{ scan_vuln_age_days }}" />
-        </div>
-        <div>
-          <label>&nbsp;</label>
-          <button type="submit">Сохранить</button>
-        </div>
-      </form>
-    </section>
-
-    <section class="panel">
-      <h2>Фильтры</h2>
-      <form method="get" action="/" class="stack">
-        <div class="grid2">
-          <div>
-            <label>Поиск по CVE или ПО</label>
-            <input type="text" name="q" value="{{ q }}" placeholder="CVE-2025-… или часть названия" />
-          </div>
-          <div>
-            <label>Статус</label>
-            <select name="status">
-              <option value="all" {% if status_filter == 'all' %}selected{% endif %}>Все</option>
-              <option value="new" {% if status_filter == 'new' %}selected{% endif %}>Новая</option>
-              <option value="in_progress" {% if status_filter == 'in_progress' %}selected{% endif %}>В работе</option>
-              <option value="closed" {% if status_filter == 'closed' %}selected{% endif %}>Закрыто</option>
-            </select>
-          </div>
-        </div>
-        <div>
-          <label class="small">
-            <input type="checkbox" name="only_new" value="1" {% if only_new %}checked{% endif %} />
-            Показывать только новые для выбранного прогона (по умолчанию — последний завершённый{% if latest_scan_id %}, #{{ latest_scan_id }}{% endif %})
-          </label>
-        </div>
-        {% if scan_run %}
-        <input type="hidden" name="scan_run" value="{{ scan_run }}" />
-        {% endif %}
-        <div>
-          <button type="submit">Применить</button>
-          <a class="btn btn-secondary" href="/">Сбросить</a>
-          <a class="btn" href="/export.csv{% if request.url.query %}?{{ request.url.query }}{% endif %}">CSV</a>
-        </div>
-      </form>
-    </section>
-
-    <section class="panel vuln-section">
-      <h2>Найденные уязвимости</h2>
-      {% if findings %}
-      <div class="vuln-list">
-        {% for f in findings %}
-        <article class="vuln-card status-{{ f.status }}">
-          <header class="vuln-card-head">
-            <div class="vuln-card-titles">
-              <span class="vuln-cve mono">{{ f.cve_id }}</span>
-              <span class="vuln-sev sev-{{ (f.severity or 'unknown')|lower }}">{{ (f.severity or "?")|upper }}</span>
-              <span class="vuln-sw">{{ f.software_name }}</span>
+      <div class="main-panel">
+        <div class="panel-left">
+          <div class="software-panel cyber-panel">
+            <div class="panel-header">
+              <h2>SOFTWARE DATABASE</h2>
             </div>
-            <p class="vuln-name">{{ f.title or "—" }}</p>
-          </header>
-          {% if f.summary %}
-          <pre class="vuln-summary" role="text">{{ f.summary }}</pre>
-          {% endif %}
-          {% if f.detail_json %}
-          <details class="vuln-json">
-            <summary>Сырой JSON (API)</summary>
-            <pre class="vuln-json-pre mono">{{ f.detail_json }}</pre>
-          </details>
-          {% endif %}
-          <form method="post" action="/finding/{{ f.id }}/update" class="vuln-actions inline-form">
-            <div>
-              <label>Статус</label>
-              <select name="status">
-                <option value="new" {% if f.status == 'new' %}selected{% endif %}>Новая</option>
-                <option value="in_progress" {% if f.status == 'in_progress' %}selected{% endif %}>В работе</option>
-                <option value="closed" {% if f.status == 'closed' %}selected{% endif %}>Закрыто</option>
+            <form class="stack" method="post" action="/software/upload" enctype="multipart/form-data" style="margin-bottom:14px;">
+              <label class="stat-label" style="display:block;margin-bottom:6px;">Upload software.txt</label>
+              <input type="file" name="file" accept=".txt,.csv,text/plain" class="cyber-input" required />
+              <button type="submit" class="cyber-button">UPLOAD FILE</button>
+            </form>
+            <form method="post" action="/software/add" style="margin-bottom:14px;">
+              <input type="text" name="name" class="cyber-input" placeholder="Software name" required />
+              <button type="submit" class="cyber-button">ADD TO DATABASE</button>
+            </form>
+            <div class="software-list">
+              {% for s in software %}
+              <div class="software-item">
+                <span>{{ s.name }}</span>
+              </div>
+              {% else %}
+              <div style="opacity:.7;padding:10px;">Пусто — загрузите список.</div>
+              {% endfor %}
+            </div>
+          </div>
+
+          <div class="scan-panel cyber-panel">
+            <div class="panel-header">
+              <h2>SCAN CONTROLS</h2>
+            </div>
+            <form method="post" action="/action/scan">
+              <label class="stat-label" style="display:block;margin-bottom:6px;">Scan age limit (days)</label>
+              <select name="vuln_age_days" class="cyber-select">
+                {% for d in [10, 20, 30, 60, 90, 180] %}
+                <option value="{{ d }}" {% if d|string == scan_vuln_age_days %}selected{% endif %}>Last {{ d }} days</option>
+                {% endfor %}
               </select>
-            </div>
-            <div>
-              <label>Комментарий</label>
-              <input type="text" name="comment" value="{{ f.comment or '' }}" placeholder="vulnm-1234" />
-            </div>
-            <div>
-              <label>&nbsp;</label>
-              <button type="submit">Сохранить</button>
-            </div>
-          </form>
-        </article>
-        {% endfor %}
-      </div>
-      {% else %}
-      <p class="small">Пока нет записей — выполните скан или ослабьте фильтры.</p>
-      {% endif %}
-    </section>
+              <button type="submit" class="cyber-button">SCAN ALL SOFTWARE</button>
+            </form>
+            <p class="stat-label" style="margin-top:10px;opacity:.85;">После скана открывается вид «только новые» последнего прогона.</p>
+          </div>
 
-    <section class="panel">
-      <h2>Последние прогоны</h2>
-      {% if scans %}
-      <table>
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>Старт</th>
-            <th>Окно (дней)</th>
-            <th>Статус</th>
-            <th>Всего / новых</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for s in scans %}
-          <tr>
-            <td class="mono">{{ s.id }}</td>
-            <td>{{ s.started_at }}</td>
-            <td>{{ s.vuln_age_days }}</td>
-            <td>{{ s.status }}{% if s.error %} — {{ s.error }}{% endif %}</td>
-            <td>{{ s.findings_count }} / {{ s.new_findings_count }}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      {% else %}
-      <p class="small">Прогонов ещё не было.</p>
-      {% endif %}
-    </section>
+          <div class="schedule-panel cyber-panel">
+            <div class="panel-header">
+              <h2>AUTOMATIC SCAN</h2>
+            </div>
+            <form method="post" action="/action/settings">
+              <label class="stat-label" style="display:block;margin-bottom:6px;">Interval (minutes, 0 = off)</label>
+              <input type="number" name="scan_interval_minutes" min="0" class="cyber-input" value="{{ scan_interval_minutes }}" />
+              <label class="stat-label" style="display:block;margin:10px 0 6px;">Age limit for scheduled scans (days)</label>
+              <input type="number" name="scan_vuln_age_days" min="1" class="cyber-input" value="{{ scan_vuln_age_days }}" />
+              <button type="submit" class="cyber-button">SAVE SCHEDULE</button>
+            </form>
+          </div>
+
+          <div class="cyber-panel" style="margin-top:20px;">
+            <div class="panel-header"><h2>LAST RUNS</h2></div>
+            {% if scans %}
+            <div style="max-height:220px;overflow:auto;font-size:0.82rem;">
+              {% for s in scans[:12] %}
+              <div style="border-bottom:1px solid rgba(187,0,255,.2);padding:6px 0;">
+                <div>#{{ s.id }} · {{ s.status }} · age &lt;{{ s.vuln_age_days }}d</div>
+                <div style="opacity:.75;">{{ s.started_at }} → hits {{ s.findings_count }} / new {{ s.new_findings_count }}</div>
+              </div>
+              {% endfor %}
+            </div>
+            {% else %}
+            <div class="stat-label">No scans yet.</div>
+            {% endif %}
+          </div>
+        </div>
+
+        <div class="panel-right">
+          <div class="vuln-panel cyber-panel">
+            <div class="panel-header">
+              <h2>VULNERABILITY DATABASE</h2>
+              <div class="button-group">
+                <a class="cyber-button small" href="/export.csv{% if request.url.query %}?{{ request.url.query }}{% endif %}">EXPORT CSV</a>
+              </div>
+            </div>
+
+            <form method="get" action="/" class="filters" style="margin-bottom:14px;">
+              <input type="text" name="q" value="{{ q }}" placeholder="CVE / software / raw" class="cyber-input" style="flex:2;min-width:200px;" />
+              <select name="status" class="cyber-select small">
+                <option value="all" {% if status_filter == 'all' %}selected{% endif %}>All Status</option>
+                <option value="new" {% if status_filter == 'new' %}selected{% endif %}>New</option>
+                <option value="in_progress" {% if status_filter == 'in_progress' %}selected{% endif %}>In Progress</option>
+                <option value="closed" {% if status_filter == 'closed' %}selected{% endif %}>Closed</option>
+              </select>
+              <select name="sort" class="cyber-select small">
+                <option value="cvss" {% if sort == 'cvss' %}selected{% endif %}>Sort: CVSS</option>
+                <option value="severity" {% if sort == 'severity' %}selected{% endif %}>Sort: Severity</option>
+                <option value="vuln_age" {% if sort == 'vuln_age' %}selected{% endif %}>Sort: Vuln Age</option>
+                <option value="updated" {% if sort == 'updated' %}selected{% endif %}>Sort: Updated</option>
+              </select>
+              <select name="order" class="cyber-select small">
+                <option value="desc" {% if order == 'desc' %}selected{% endif %}>Desc</option>
+                <option value="asc" {% if order == 'asc' %}selected{% endif %}>Asc</option>
+              </select>
+              <label class="cyber-select small" style="display:flex;align-items:center;gap:8px;border:none;padding:6px 10px;">
+                <input type="checkbox" name="only_new" value="1" {% if only_new %}checked{% endif %} />
+                only new
+              </label>
+              {% if scan_run %}<input type="hidden" name="scan_run" value="{{ scan_run }}" />{% endif %}
+              <button type="submit" class="cyber-button small" style="width:auto;">APPLY</button>
+              <a class="cyber-button small" style="width:auto;text-decoration:none;display:inline-block;" href="/">RESET</a>
+            </form>
+
+            <div class="vuln-list">
+              {% for f in findings %}
+              <div class="vuln-item {{ f.status }}">
+                <div class="vuln-card-head">
+                  <div>
+                    <span class="vuln-id">{{ f.cve_id }}</span>
+                    <span class="vuln-cvss">CVSS: {{ f.cvss_score if f.cvss_score is not none else 'N/A' }}</span>
+                  </div>
+                  <div class="vuln-meta">
+                    <span><i>&gt;_</i> {{ f.software_name }}</span>
+                    <span><i>⚡</i> {{ (f.severity or 'unknown') | upper }}</span>
+                    <span><i>⌛</i> Age: {% if f.vuln_age_days is not none %}{{ f.vuln_age_days }}d{% else %}N/A{% endif %}</span>
+                  </div>
+                </div>
+                <pre class="vuln-raw">{{ f.raw_output or (f.title or '') }}</pre>
+                {% if f.comment %}
+                <div class="vuln-comment">// {{ f.comment }}</div>
+                {% endif %}
+                <form method="post" action="/finding/{{ f.id }}/update" class="vuln-actions" style="margin-top:12px;">
+                  <input type="hidden" name="next" value="{% if request.url.query %}/?{{ request.url.query }}{% else %}/{% endif %}" />
+                  <select name="status" class="cyber-select small">
+                    <option value="new" {% if f.status == 'new' %}selected{% endif %}>NEW</option>
+                    <option value="in_progress" {% if f.status == 'in_progress' %}selected{% endif %}>IN PROGRESS</option>
+                    <option value="closed" {% if f.status == 'closed' %}selected{% endif %}>CLOSED</option>
+                  </select>
+                  <input type="text" name="comment" value="{{ f.comment or '' }}" class="cyber-input" placeholder="vulnm-1234" />
+                  <button type="submit" class="cyber-button small" style="width:auto;">UPDATE</button>
+                </form>
+              </div>
+              {% else %}
+              <div style="text-align:center;padding:40px;opacity:.75;">No vulnerabilities for current filters.</div>
+              {% endfor %}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </body>
 </html>

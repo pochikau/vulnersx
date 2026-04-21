@@ -35,13 +35,17 @@ CREATE TABLE IF NOT EXISTS findings (
     title TEXT,
     severity TEXT,
     summary TEXT,
+    raw_output TEXT,
+    cvss_score REAL,
+    epss_score REAL,
+    vuln_age_days INTEGER,
+    severity_rank INTEGER DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'new',
     comment TEXT,
     first_seen_scan_id INTEGER NOT NULL,
     last_seen_scan_id INTEGER NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    detail_json TEXT,
     UNIQUE (cve_id, software_id),
     FOREIGN KEY (software_id) REFERENCES software(id),
     FOREIGN KEY (first_seen_scan_id) REFERENCES scan_runs(id),
@@ -77,16 +81,32 @@ def connect(db_path: Path) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-def _migrate_findings_columns(conn: sqlite3.Connection) -> None:
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(findings)").fetchall()}
-    if "detail_json" not in cols:
-        conn.execute("ALTER TABLE findings ADD COLUMN detail_json TEXT")
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return {str(r[1]) for r in rows}
+
+
+def migrate_findings(conn: sqlite3.Connection) -> None:
+    cols = _table_columns(conn, "findings")
+    alters: list[str] = []
+    if "raw_output" not in cols:
+        alters.append("ALTER TABLE findings ADD COLUMN raw_output TEXT")
+    if "cvss_score" not in cols:
+        alters.append("ALTER TABLE findings ADD COLUMN cvss_score REAL")
+    if "epss_score" not in cols:
+        alters.append("ALTER TABLE findings ADD COLUMN epss_score REAL")
+    if "vuln_age_days" not in cols:
+        alters.append("ALTER TABLE findings ADD COLUMN vuln_age_days INTEGER")
+    if "severity_rank" not in cols:
+        alters.append("ALTER TABLE findings ADD COLUMN severity_rank INTEGER DEFAULT 0")
+    for sql in alters:
+        conn.execute(sql)
 
 
 def init_db(db_path: Path) -> None:
     with connect(db_path) as conn:
         conn.executescript(SCHEMA)
-        _migrate_findings_columns(conn)
+        migrate_findings(conn)
         cur = conn.execute("SELECT COUNT(*) FROM settings WHERE key = 'scan_interval_minutes'")
         if cur.fetchone()[0] == 0:
             conn.execute(
@@ -201,7 +221,11 @@ def upsert_finding(
     title: str | None,
     severity: str | None,
     summary: str | None,
-    detail_json: str | None,
+    raw_output: str | None,
+    cvss_score: float | None,
+    epss_score: float | None,
+    vuln_age_days: int | None,
+    severity_rank: int,
     scan_run_id: int,
 ) -> str:
     """Returns 'inserted' or 'updated'."""
@@ -215,9 +239,11 @@ def upsert_finding(
         conn.execute(
             """
             INSERT INTO findings (
-                cve_id, software_id, title, severity, summary, detail_json, status, comment,
+                cve_id, software_id, title, severity, summary,
+                raw_output, cvss_score, epss_score, vuln_age_days, severity_rank,
+                status, comment,
                 first_seen_scan_id, last_seen_scan_id, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, 'new', NULL, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', NULL, ?, ?, ?, ?)
             """,
             (
                 cve_id,
@@ -225,7 +251,11 @@ def upsert_finding(
                 title,
                 severity,
                 summary,
-                detail_json,
+                raw_output,
+                cvss_score,
+                epss_score,
+                vuln_age_days,
+                severity_rank,
                 scan_run_id,
                 scan_run_id,
                 now,
@@ -236,15 +266,31 @@ def upsert_finding(
     conn.execute(
         """
         UPDATE findings SET
-            title = COALESCE(?, title),
-            severity = COALESCE(?, severity),
-            summary = COALESCE(?, summary),
-            detail_json = COALESCE(?, detail_json),
+            title = ?,
+            severity = ?,
+            summary = ?,
+            raw_output = ?,
+            cvss_score = ?,
+            epss_score = ?,
+            vuln_age_days = ?,
+            severity_rank = ?,
             last_seen_scan_id = ?,
             updated_at = ?
         WHERE id = ?
         """,
-        (title, severity, summary, detail_json, scan_run_id, now, int(row["id"])),
+        (
+            title,
+            severity,
+            summary,
+            raw_output,
+            cvss_score,
+            epss_score,
+            vuln_age_days,
+            severity_rank,
+            scan_run_id,
+            now,
+            int(row["id"]),
+        ),
     )
     return "updated"
 
@@ -268,27 +314,56 @@ def fetch_findings(
     q: str | None,
     status: str | None,
     only_new_from_scan: int | None,
+    sort_by: str = "cvss",
+    sort_order: str = "desc",
 ) -> list[sqlite3.Row]:
     where: list[str] = ["1=1"]
     params: list[Any] = []
     if q:
         like = f"%{q.strip()}%"
-        where.append("(f.cve_id LIKE ? OR s.name LIKE ?)")
-        params.extend([like, like])
+        where.append("(f.cve_id LIKE ? OR s.name LIKE ? OR IFNULL(f.raw_output,'') LIKE ?)")
+        params.extend([like, like, like])
     if status and status != "all":
         where.append("f.status = ?")
         params.append(status)
     if only_new_from_scan is not None:
         where.append("f.first_seen_scan_id = ?")
         params.append(only_new_from_scan)
+
+    order = "DESC" if sort_order.lower() != "asc" else "ASC"
+    sort_by = (sort_by or "cvss").lower()
+    if sort_by == "severity":
+        order_sql = f"f.severity_rank {order}, (f.cvss_score IS NULL) ASC, f.cvss_score DESC, f.cve_id"
+    elif sort_by == "vuln_age":
+        nulls = "ASC" if order == "DESC" else "DESC"
+        order_sql = f"(f.vuln_age_days IS NULL) {nulls}, f.vuln_age_days {order}, f.cve_id"
+    elif sort_by == "updated":
+        order_sql = f"f.updated_at {order}, f.cve_id"
+    else:
+        nulls = "ASC" if order == "DESC" else "DESC"
+        order_sql = f"(f.cvss_score IS NULL) {nulls}, f.cvss_score {order}, f.severity_rank DESC, f.cve_id"
+
     sql = f"""
         SELECT f.*, s.name AS software_name
         FROM findings f
         JOIN software s ON s.id = f.software_id
         WHERE {' AND '.join(where)}
-        ORDER BY f.updated_at DESC, f.cve_id
+        ORDER BY {order_sql}
     """
     return conn.execute(sql, params).fetchall()
+
+
+def count_findings_by_status(conn: sqlite3.Connection) -> dict[str, int]:
+    total = int(conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0])
+    rows = conn.execute(
+        "SELECT status, COUNT(*) AS c FROM findings GROUP BY status"
+    ).fetchall()
+    out: dict[str, int] = {"new": 0, "in_progress": 0, "closed": 0, "total": total}
+    for r in rows:
+        st = str(r["status"])
+        if st in out:
+            out[st] = int(r["c"])
+    return out
 
 
 def latest_completed_scan(conn: sqlite3.Connection) -> sqlite3.Row | None:

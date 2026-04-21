@@ -1,22 +1,37 @@
 """
-Invoke `vulnx search` and parse JSON (SearchResponse.results[]) into records.
+Invoke `vulnx search` and capture full CLI-style text blocks per CVE, plus parsed metrics.
 
-API shape matches projectdiscovery/vulnx SearchResponse / Vulnerability (types.go).
+Uses plain text output (not --json) so the stored `raw_output` matches what users see in the terminal.
 """
 
 from __future__ import annotations
 
 import json
-import math
 import os
 import re
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
-CVE_RE = re.compile(r"CVE-\d{4}-\d+", re.IGNORECASE)
+CVE_HEADER = re.compile(r"^\s*\[(CVE-\d{4}-\d+)\]\s+(.+?)\s*$", re.MULTILINE)
+CVE_LINE = re.compile(r"^\s*\[(CVE-\d{4}-\d+)\]\s+(\S+)\s+-\s+(.+)\s*$")
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+CVSS_RE = re.compile(r"CVSS:\s*([\d.]+|N/A|—)", re.I)
+EPSS_RE = re.compile(r"EPSS:\s*([\d.]+|N/A|—)", re.I)
+AGE_RE = re.compile(r"Vuln Age:\s*(\d+)\s*d", re.I)
+
+
+def strip_ansi(s: str) -> str:
+    return ANSI_RE.sub("", s)
+
+
+def _severity_rank(severity: str | None) -> int:
+    if not severity:
+        return 0
+    m = severity.strip().lower()
+    return {"critical": 4, "high": 3, "medium": 2, "low": 1}.get(m, 0)
 
 
 @dataclass
@@ -24,233 +39,267 @@ class VulnHit:
     cve_id: str
     title: str | None
     severity: str | None
-    summary: str  # human-readable block (CLI-style)
-    detail: dict[str, Any] = field(default_factory=dict)
+    summary: str | None
+    raw_output: str
+    cvss_score: float | None
+    epss_score: float | None
+    vuln_age_days: int | None
+    severity_rank: int
+
+    @staticmethod
+    def from_block(block: str) -> VulnHit | None:
+        block = block.strip()
+        if not block:
+            return None
+        first = block.splitlines()[0].strip()
+        m = CVE_LINE.match(first)
+        cve_id: str
+        severity: str | None
+        title: str | None
+        if m:
+            cve_id = m.group(1).upper()
+            severity = m.group(2).strip().lower()
+            title = m.group(3).strip()
+        else:
+            mh = CVE_HEADER.match(first)
+            if not mh:
+                return None
+            cve_id = mh.group(1).upper()
+            rest = mh.group(2).strip()
+            severity = None
+            title = rest
+            parts = rest.split(None, 1)
+            if len(parts) >= 2 and parts[0].lower() in (
+                "critical",
+                "high",
+                "medium",
+                "low",
+                "info",
+                "unknown",
+            ):
+                severity = parts[0].lower()
+                title = parts[1].lstrip("- ").strip()
+
+        cvss: float | None = None
+        cm = CVSS_RE.search(block)
+        if cm and cm.group(1) not in ("N/A", "—"):
+            try:
+                cvss = float(cm.group(1))
+            except ValueError:
+                pass
+
+        epss: float | None = None
+        em = EPSS_RE.search(block)
+        if em and em.group(1) not in ("N/A", "—"):
+            try:
+                epss = float(em.group(1))
+            except ValueError:
+                pass
+
+        age: int | None = None
+        am = AGE_RE.search(block)
+        if am:
+            try:
+                age = int(am.group(1))
+            except ValueError:
+                pass
+
+        sr = _severity_rank(severity)
+        return VulnHit(
+            cve_id=cve_id,
+            title=title,
+            severity=severity,
+            summary=None,
+            raw_output=block,
+            cvss_score=cvss,
+            epss_score=epss,
+            vuln_age_days=age,
+            severity_rank=sr,
+        )
 
 
-def _f(x: Any) -> str:
-    if x is None:
-        return ""
-    if isinstance(x, float) and (math.isnan(x) or math.isinf(x)):
-        return ""
-    if isinstance(x, bool):
-        return "✔" if x else "✘"
-    return str(x)
+def split_cve_blocks(text: str) -> list[str]:
+    text = strip_ansi(text)
+    if not text.strip():
+        return []
+    lines = text.splitlines()
+    blocks: list[list[str]] = []
+    cur: list[str] = []
+    for line in lines:
+        if line.strip().startswith("[CVE-"):
+            if cur:
+                blocks.append("\n".join(cur).strip())
+            cur = [line]
+        else:
+            if cur:
+                cur.append(line)
+    if cur:
+        blocks.append("\n".join(cur).strip())
+    return [b for b in blocks if b]
 
 
-def _fmt_float(x: Any, nd: int = 4) -> str:
-    if x is None:
-        return ""
-    try:
-        v = float(x)
-        if math.isnan(v) or math.isinf(v):
-            return ""
-        return f"{v:.{nd}f}".rstrip("0").rstrip(".")
-    except (TypeError, ValueError):
-        return ""
-
-
-def _exposure_hosts(v: dict[str, Any]) -> str:
-    exp = v.get("exposure")
-    if isinstance(exp, dict):
-        mh = exp.get("max_hosts")
-        if mh is not None:
-            return str(mh)
-        vals = exp.get("values") or []
-        best = 0
-        for item in vals:
-            if not isinstance(item, dict):
-                continue
-            for key in ("max_hosts", "min_hosts"):
-                try:
-                    n = int(item.get(key) or 0)
-                    best = max(best, n)
-                except (TypeError, ValueError):
-                    continue
-        if best:
-            return str(best)
-    return ""
-
-
-def _kev_sources(v: dict[str, Any]) -> str:
-    out: list[str] = []
-    for k in v.get("kev") or []:
-        if isinstance(k, dict) and k.get("source"):
-            out.append(str(k["source"]))
-    if v.get("is_kev") and not out:
-        return "CISA/KEV"
-    return ", ".join(sorted(set(out))) if out else ""
-
-
-def _affected_lines(v: dict[str, Any]) -> tuple[str, str]:
-    vendors: list[str] = []
-    products: list[str] = []
-    for p in v.get("affected_products") or []:
-        if not isinstance(p, dict):
+def parse_text_hits(stdout: str) -> list[VulnHit]:
+    out: list[VulnHit] = []
+    seen: set[str] = set()
+    for block in split_cve_blocks(stdout):
+        hit = VulnHit.from_block(block)
+        if hit is None:
             continue
-        if p.get("vendor"):
-            vendors.append(str(p["vendor"]))
-        if p.get("product"):
-            products.append(str(p["product"]))
-    return ", ".join(sorted(set(vendors))), ", ".join(sorted(set(products)))
+        if hit.cve_id in seen:
+            continue
+        seen.add(hit.cve_id)
+        out.append(hit)
+    return out
 
 
-def _h1_reports(v: dict[str, Any]) -> str:
-    h = v.get("h1")
-    if isinstance(h, dict) and h.get("reports") is not None:
-        return str(h["reports"])
-    return ""
+# --- Legacy JSON path (fallback) ---------------------------------------------
+
+CVE_RE = re.compile(r"CVE-\d{4}-\d+", re.IGNORECASE)
 
 
-def format_vulnerability_block(v: dict[str, Any], software_query: str) -> str:
-    """Readable block similar to vulnx CLI / old_data raw output."""
-    cve = (v.get("cve_id") or "?").strip()
-    sev = (v.get("severity") or "?").strip().title()
-    name = (v.get("name") or "").strip() or (v.get("description") or "")[:200]
-    line1 = f"[{cve}] {sev} - {name}".strip()
-
-    cvss = _fmt_float(v.get("cvss_score"), 1)
-    epss = _fmt_float(v.get("epss_score"), 4)
-    epssp = _fmt_float(v.get("epss_percentile"), 2)
-    age = v.get("age_in_days")
-    age_s = "" if age is None else f"{age}d"
-
-    kev_flag = bool(v.get("is_kev"))
-    kev_src = _kev_sources(v)
-    kev_txt = "✔" if kev_flag else "✘"
-    if kev_src:
-        kev_txt += f" ({kev_src})"
-
-    prio = "IMMEDIATE" if sev.lower() == "critical" else "HIGH" if sev.lower() == "high" else "NORMAL"
-    exploits = bool(v.get("is_poc")) or int(v.get("poc_count") or 0) > 0
-
-    exp = _exposure_hosts(v)
-    vendors, products = _affected_lines(v)
-    patch = bool(v.get("is_patch_available"))
-    pocs = int(v.get("poc_count") or 0)
-    nuclei = bool(v.get("is_template"))
-    h1 = _h1_reports(v)
-
-    epss_band = ""
+def _iter_json_blobs(raw: str) -> Iterator[Any]:
+    raw = raw.strip()
+    if not raw:
+        return
     try:
-        epss_f = float(v.get("epss_score") or 0)
-        if epss_f >= 0.75:
-            epss_band = "HIGH"
-        elif epss_f >= 0.35:
-            epss_band = "MED"
-        elif epss_f > 0:
-            epss_band = "LOW"
-    except (TypeError, ValueError):
+        yield json.loads(raw)
+        return
+    except json.JSONDecodeError:
         pass
-
-    lines = [
-        line1,
-        f"  ↳ Priority: {prio} | {'EXPLOITS AVAILABLE' if exploits else 'No public exploits flag'} | Vuln Age: {age_s or '—'}",
-        f"  ↳ CVSS: {cvss or '—'} | EPSS: {epss or '—'} ({epss_band or '—'}) | KEV: {kev_txt}",
-        f"  ↳ Query software: {software_query} | Exposure: {exp or '—'}",
-        f"  ↳ Vendors: {vendors or '—'} | Products: {products or '—'}",
-        f"  ↳ Patch: {_f(patch)} | POCs: {pocs} | Nuclei Template: {_f(nuclei)} | HackerOne reports: {h1 or '—'}",
-    ]
-    authors = v.get("author")
-    if isinstance(authors, list) and authors:
-        lines.append(f"  ↳ Template Authors: {', '.join(str(a) for a in authors[:8])}")
-    return "\n".join(lines).strip()
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            yield json.loads(line)
+        except json.JSONDecodeError:
+            continue
 
 
-def _normalize_severity(s: Any) -> str | None:
-    if isinstance(s, str) and s.strip():
-        return s.strip().lower()
+def _walk_for_dicts(obj: Any) -> Iterator[dict[str, Any]]:
+    if isinstance(obj, dict):
+        yield obj
+        for v in obj.values():
+            yield from _walk_for_dicts(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from _walk_for_dicts(item)
+
+
+def _pick_str(d: dict[str, Any], *keys: str) -> str | None:
+    for k in keys:
+        v = d.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
     return None
 
 
-def _vulnerability_from_dict(v: dict[str, Any], software_query: str) -> VulnHit | None:
-    cve = v.get("cve_id")
-    if not isinstance(cve, str) or not cve.strip():
-        blob = json.dumps(v, ensure_ascii=False)
+def _normalize_severity(v: Any) -> str | None:
+    if isinstance(v, str) and v.strip():
+        return v.strip().lower()
+    return None
+
+
+def _float_or_none(v: Any) -> float | None:
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        try:
+            return float(v)
+        except ValueError:
+            return None
+    return None
+
+
+def _int_or_none(v: Any) -> int | None:
+    if isinstance(v, int):
+        return v
+    if isinstance(v, str) and v.isdigit():
+        return int(v)
+    return None
+
+
+def _record_from_dict(d: dict[str, Any]) -> VulnHit | None:
+    cve = _pick_str(d, "cve_id", "cveId", "id", "CVE_ID")
+    if not cve:
+        blob = json.dumps(d, ensure_ascii=False)
         m = CVE_RE.search(blob)
         if not m:
             return None
         cve = m.group(0).upper()
     else:
-        cve = cve.strip().upper()
+        cve = cve.upper()
+        if not re.fullmatch(r"CVE-\d{4}-\d+", cve, re.I):
+            m = CVE_RE.search(cve)
+            if not m:
+                return None
+            cve = m.group(0).upper()
 
-    title = v.get("name")
-    if not isinstance(title, str) or not title.strip():
-        desc = v.get("description")
-        title = desc[:300] if isinstance(desc, str) else None
+    title = _pick_str(d, "title", "name", "summary_title")
+    severity = _normalize_severity(d.get("severity")) or _normalize_severity(d.get("Severity"))
+    cvss = _float_or_none(d.get("cvss_score")) or _float_or_none(d.get("cvss"))
+    epss = _float_or_none(d.get("epss_score")) or _float_or_none(d.get("epss"))
+    age = _int_or_none(d.get("age_in_days")) or _int_or_none(d.get("vuln_age_days"))
 
-    sev = _normalize_severity(v.get("severity"))
-    block = format_vulnerability_block(v, software_query)
-    return VulnHit(cve_id=cve, title=title.strip() if isinstance(title, str) else None, severity=sev, summary=block, detail=v)
+    summary_parts: list[str] = []
+    for key in ("description", "summary", "text", "detail"):
+        val = d.get(key)
+        if isinstance(val, str) and val.strip():
+            summary_parts.append(val.strip())
+    summary = "\n".join(summary_parts) if summary_parts else None
+    if not title:
+        title = summary[:200] if summary else None
 
-
-def parse_vulnx_json(stdout: str, software_query: str = "") -> list[VulnHit]:
-    raw = (stdout or "").strip()
-    if not raw:
-        return []
-
-    data: Any
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return _legacy_parse(stdout, software_query)
-
-    if isinstance(data, dict) and isinstance(data.get("results"), list):
-        out: list[VulnHit] = []
-        seen: set[str] = set()
-        for item in data["results"]:
-            if not isinstance(item, dict):
-                continue
-            hit = _vulnerability_from_dict(item, software_query)
-            if hit is None or hit.cve_id in seen:
-                continue
-            seen.add(hit.cve_id)
-            out.append(hit)
-        if out:
-            return out
-
-    if isinstance(data, list):
-        out = []
-        seen = set()
-        for item in data:
-            if isinstance(item, dict):
-                hit = _vulnerability_from_dict(item, software_query)
-                if hit and hit.cve_id not in seen:
-                    seen.add(hit.cve_id)
-                    out.append(hit)
-        if out:
-            return out
-
-    return _legacy_parse(stdout, software_query)
+    lines = [f"[{cve}] {(severity or '?').title()} - {title or ''}"]
+    if cvss is not None:
+        lines.append(f"  ↳ CVSS: {cvss} | EPSS: {epss if epss is not None else 'N/A'} | Vuln Age: {age if age is not None else 'N/A'}d")
+    raw_output = "\n".join(lines)
+    sr = _severity_rank(severity)
+    return VulnHit(
+        cve_id=cve,
+        title=title,
+        severity=severity,
+        summary=summary,
+        raw_output=raw_output,
+        cvss_score=cvss,
+        epss_score=epss,
+        vuln_age_days=age,
+        severity_rank=sr,
+    )
 
 
-def _legacy_parse(stdout: str, software_query: str) -> list[VulnHit]:
+def parse_vulnx_json(stdout: str) -> list[VulnHit]:
     seen: set[str] = set()
     out: list[VulnHit] = []
-    for line in stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            blob = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(blob, dict) and "results" in blob and isinstance(blob["results"], list):
-            for item in blob["results"]:
-                if isinstance(item, dict):
-                    hit = _vulnerability_from_dict(item, software_query)
-                    if hit and hit.cve_id not in seen:
-                        seen.add(hit.cve_id)
-                        out.append(hit)
-        elif isinstance(blob, dict):
-            hit = _vulnerability_from_dict(blob, software_query)
-            if hit and hit.cve_id not in seen:
-                seen.add(hit.cve_id)
-                out.append(hit)
+    for blob in _iter_json_blobs(stdout):
+        for d in _walk_for_dicts(blob):
+            rec = _record_from_dict(d)
+            if rec is None:
+                continue
+            if rec.cve_id in seen:
+                continue
+            seen.add(rec.cve_id)
+            out.append(rec)
     return out
 
 
-def build_search_cmd(software: str, vuln_age_days: int, limit: int = 100) -> list[str]:
+def build_search_cmd_text(software: str, vuln_age_days: int, limit: int = 100) -> list[str]:
+    age = max(1, int(vuln_age_days))
+    return [
+        "vulnx",
+        "search",
+        software,
+        "--severity",
+        "critical,high",
+        "--vuln-age",
+        f"<{age}",
+        "--limit",
+        str(limit),
+        "--disable-update-check",
+    ]
+
+
+def build_search_cmd_json(software: str, vuln_age_days: int, limit: int = 100) -> list[str]:
     age = max(1, int(vuln_age_days))
     return [
         "vulnx",
@@ -273,15 +322,18 @@ def run_search(
     *,
     timeout_sec: int = 600,
 ) -> tuple[list[VulnHit], str | None]:
-    cmd = build_search_cmd(software, vuln_age_days)
+    """
+    Text-first search; falls back to JSON if text yields no CVE blocks.
+    """
     env = os.environ.copy()
     api = env.get("VULNX_API_KEY") or env.get("PDCP_API_KEY")
     if api:
         env["PDCP_API_KEY"] = api
 
+    cmd_text = build_search_cmd_text(software, vuln_age_days)
     try:
         proc = subprocess.run(
-            cmd,
+            cmd_text,
             capture_output=True,
             text=True,
             timeout=timeout_sec,
@@ -297,11 +349,31 @@ def run_search(
         msg = err or proc.stdout.strip() or f"exit {proc.returncode}"
         return [], msg
 
-    hits = parse_vulnx_json(proc.stdout or "", software_query=software)
+    out = parse_text_hits(proc.stdout or "")
+    if out:
+        return out, (err if err else None)
+
+    cmd_json = build_search_cmd_json(software, vuln_age_days)
+    try:
+        proc2 = subprocess.run(
+            cmd_json,
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+            env=env,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return [], err or "fallback json failed"
+
+    if proc2.returncode != 0:
+        return [], err or proc2.stderr.strip() or "json search failed"
+
+    hits = parse_vulnx_json(proc2.stdout or "")
     return hits, (err if err else None)
 
 
 def run_cli_software_file(input_path: Path, vuln_age_days: int = 190) -> int:
+    """CLI: print each software block (stdout)."""
     if not input_path.is_file():
         print(f"Файл {input_path} не найден", file=sys.stderr)
         return 1
@@ -320,9 +392,9 @@ def run_cli_software_file(input_path: Path, vuln_age_days: int = 190) -> int:
         if err:
             print(err, file=sys.stderr)
         for h in hits:
-            print(h.summary)
+            print(h.raw_output)
             print()
-        print("═" * 60 + "\n")
+        print("\n" + "═" * 60 + "\n")
     return 0
 
 
