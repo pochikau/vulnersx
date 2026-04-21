@@ -221,6 +221,106 @@ def parse_vulnx_cli_fields(raw: str | None) -> dict[str, str]:
     return out
 
 
+# --- CSV как в old_data/app.py (export_vulnerabilities) -----------------------
+
+OLD_DATA_CSV_HEADER: tuple[str, ...] = (
+    "CVE ID",
+    "Name",
+    "Software",
+    "CVSS",
+    "Severity",
+    "Status",
+    "Priority",
+    "Exploits",
+    "EPSS",
+    "KEV",
+    "Patch",
+    "Vuln Age",
+    "Found Date",
+    "Comment",
+)
+
+
+def _tick_to_yes_no(s: str) -> str:
+    """✔ / ✘ из вывода vulnx → Yes / No (как булевы поля в old_data)."""
+    if not s or not str(s).strip():
+        return ""
+    t = str(s).strip()
+    if "✔" in t:
+        return "Yes"
+    if "✘" in t:
+        return "No"
+    return ""
+
+
+def _exploits_yes_no(parsed: dict[str, str], raw: str) -> str:
+    raw_l = (raw or "").lower()
+    if "exploits available" in raw_l:
+        return "Yes"
+    if "no exploits" in raw_l:
+        return "No"
+    es = (parsed.get("exploits_status") or "").lower()
+    if "available" in es and "no" not in es[:12]:
+        return "Yes"
+    if "no exploit" in es:
+        return "No"
+    return ""
+
+
+def _vuln_age_cell(r: Any, parsed: dict[str, str]) -> str:
+    vt = (parsed.get("vuln_age_text") or "").strip()
+    if vt:
+        return vt
+    try:
+        d = r["vuln_age_days"]
+        if d is not None:
+            return f"{int(d)}d"
+    except (KeyError, TypeError, ValueError):
+        pass
+    return ""
+
+
+def _format_found_date_iso(created_at: str | None) -> str:
+    if not created_at:
+        return ""
+    from datetime import datetime
+
+    s = str(created_at).replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(s)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        cs = str(created_at)
+        return cs[:19] if len(cs) >= 19 else cs
+
+
+def old_data_csv_row(r: Any, parsed: dict[str, str], raw: str) -> list[Any]:
+    """
+    Строка CSV в том же порядке полей, что и Flask old_data/app.py
+    (export_vulnerabilities).
+    """
+    raw = raw or ""
+    sev = (r["severity"] or "").strip()
+    if sev:
+        sev = sev.upper()
+    return [
+        r["cve_id"],
+        r["title"] or "",
+        r["software_name"],
+        r["cvss_score"] if r["cvss_score"] is not None else "",
+        sev,
+        r["status"],
+        parsed.get("priority", ""),
+        _exploits_yes_no(parsed, raw),
+        r["epss_score"] if r["epss_score"] is not None else "",
+        _tick_to_yes_no(parsed.get("kev", "")),
+        _tick_to_yes_no(parsed.get("patch", "")),
+        _vuln_age_cell(r, parsed),
+        _format_found_date_iso(r["created_at"]),
+        r["comment"] or "",
+    ]
+
+
 # --- Legacy JSON path (fallback) ---------------------------------------------
 
 CVE_RE = re.compile(r"CVE-\d{4}-\d+", re.IGNORECASE)
