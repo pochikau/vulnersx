@@ -22,7 +22,13 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 import db
-from vulnx_scanner import run_search
+from vulnx_scanner import (
+    MAX_RAW_LINES_FOR_CSV,
+    PARSED_FIELD_KEYS,
+    parse_vulnx_cli_fields,
+    run_search,
+    split_raw_output_lines,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DATA_DIR", str(BASE_DIR / "data")))
@@ -385,41 +391,55 @@ async def export_csv(
             software_id=software_id,
         )
 
+    line_headers = [f"output_line_{i:02d}" for i in range(1, MAX_RAW_LINES_FOR_CSV + 1)]
+    header = [
+        "cve_id",
+        "software",
+        "severity",
+        "title",
+        "summary",
+        "cvss_score",
+        "epss_score",
+        "vuln_age_days",
+        "severity_rank",
+        "status",
+        "comment",
+        "first_seen_scan_id",
+        "last_seen_scan_id",
+        "updated_at",
+        *line_headers,
+        "output_overflow",
+        *PARSED_FIELD_KEYS,
+        "full_raw_output",
+    ]
+
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(
-        [
-            "cve_id",
-            "software",
-            "severity",
-            "title",
-            "cvss_score",
-            "epss_score",
-            "vuln_age_days",
-            "status",
-            "comment",
-            "raw_output",
-            "first_seen_scan_id",
-            "last_seen_scan_id",
-            "updated_at",
-        ]
-    )
+    w.writerow(header)
     for r in rows:
+        raw_full = r["raw_output"] or ""
+        out_lines, out_overflow = split_raw_output_lines(raw_full)
+        parsed = parse_vulnx_cli_fields(raw_full)
         w.writerow(
             [
                 r["cve_id"],
                 r["software_name"],
                 r["severity"] or "",
                 r["title"] or "",
+                r["summary"] or "",
                 r["cvss_score"] if r["cvss_score"] is not None else "",
                 r["epss_score"] if r["epss_score"] is not None else "",
                 r["vuln_age_days"] if r["vuln_age_days"] is not None else "",
+                r["severity_rank"] if r["severity_rank"] is not None else "",
                 r["status"],
                 r["comment"] or "",
-                r["raw_output"] or "",
                 r["first_seen_scan_id"],
                 r["last_seen_scan_id"],
                 r["updated_at"],
+                *out_lines,
+                out_overflow,
+                *[parsed[k] for k in PARSED_FIELD_KEYS],
+                raw_full,
             ]
         )
     buf.seek(0)

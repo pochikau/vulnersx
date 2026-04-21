@@ -152,6 +152,75 @@ def parse_text_hits(stdout: str) -> list[VulnHit]:
     return out
 
 
+# --- CSV export: полный вывод vulnx по колонкам --------------------------------
+
+MAX_RAW_LINES_FOR_CSV = 24
+
+# Поля, извлекаемые из текста (как в CLI: Priority, KEV, Vendors, …)
+PARSED_FIELD_KEYS: tuple[str, ...] = (
+    "priority",
+    "exploits_status",
+    "vuln_age_text",
+    "kev",
+    "exposure",
+    "vendors",
+    "products",
+    "patch",
+    "pocs",
+    "nuclei_template",
+    "hackerone",
+    "template_authors",
+)
+
+
+def split_raw_output_lines(
+    raw: str | None, max_lines: int = MAX_RAW_LINES_FOR_CSV
+) -> tuple[list[str], str]:
+    """Каждая строка блока вывода — отдельная колонка; хвост — в overflow."""
+    if not raw or not str(raw).strip():
+        return [""] * max_lines, ""
+    lines = strip_ansi(str(raw)).splitlines()
+    if len(lines) <= max_lines:
+        return lines + [""] * (max_lines - len(lines)), ""
+    return lines[:max_lines], "\n".join(lines[max_lines:])
+
+
+def parse_vulnx_cli_fields(raw: str | None) -> dict[str, str]:
+    """Разбор типичного текстового блока vulnx search (стрелки ↳, поля через |)."""
+    out = {k: "" for k in PARSED_FIELD_KEYS}
+    if not raw or not str(raw).strip():
+        return out
+    t = strip_ansi(str(raw))
+
+    def grab(pat: str) -> str:
+        m = re.search(pat, t, re.I | re.S)
+        return m.group(1).strip() if m else ""
+
+    out["priority"] = grab(r"Priority:\s*([^|]+)")
+    if re.search(r"No exploits", t, re.I):
+        out["exploits_status"] = "No exploits"
+    elif re.search(r"EXPLOITS\s+AVAILABLE", t, re.I):
+        out["exploits_status"] = "EXPLOITS AVAILABLE"
+    else:
+        mx = re.search(r"\|\s*([^|]{0,80}(?:exploit|Exploit)[^|]{0,80})\s*\|", t)
+        if mx:
+            out["exploits_status"] = mx.group(1).strip()
+
+    out["vuln_age_text"] = grab(r"Vuln Age:\s*([^\s|]+)")
+    out["kev"] = grab(r"KEV:\s*([^\n|]+?)(?=\s*\||\s*↳|\s*$)")
+    out["exposure"] = grab(r"Exposure:\s*([^|]+)")
+    out["vendors"] = grab(r"Vendors:\s*([^|]+)")
+    out["products"] = grab(r"Products:\s*([^|]+)")
+    out["patch"] = grab(r"Patch:\s*([^\s|]+)")
+    out["pocs"] = grab(r"POCs:\s*([^\s|]+)")
+    out["nuclei_template"] = grab(r"Nuclei Template:\s*([^\s|]+)")
+    out["hackerone"] = grab(r"HackerOne:\s*([^\s|]+)")
+    m = re.search(r"Template Authors?:\s*(.+?)(?:\s*$)", t, re.I | re.M)
+    if m:
+        out["template_authors"] = m.group(1).strip()
+    return out
+
+
 # --- Legacy JSON path (fallback) ---------------------------------------------
 
 CVE_RE = re.compile(r"CVE-\d{4}-\d+", re.IGNORECASE)
