@@ -97,6 +97,45 @@ def execute_scan(vuln_age_days: int) -> tuple[int | None, str | None]:
             return run_id, err_note
 
 
+def execute_scan_one(software_id: int, vuln_age_days: int) -> tuple[int | None, str | None]:
+    """Сканирование одного выбранного ПО по id."""
+    with SCAN_LOCK:
+        with db.connect(DB_PATH) as conn:
+            sw = db.get_software_by_id(conn, software_id)
+            if sw is None:
+                return None, "Указанное ПО не найдено в базе."
+
+            run_id = db.start_scan_run(conn, vuln_age_days)
+            new_count = 0
+            total = 0
+            err_note: str | None = None
+
+            hits, serr = run_search(sw.name, vuln_age_days)
+            if serr:
+                err_note = serr
+            for hit in hits:
+                total += 1
+                kind = db.upsert_finding(
+                    conn,
+                    cve_id=hit.cve_id,
+                    software_id=sw.id,
+                    title=hit.title,
+                    severity=hit.severity,
+                    summary=hit.summary,
+                    raw_output=hit.raw_output,
+                    cvss_score=hit.cvss_score,
+                    epss_score=hit.epss_score,
+                    vuln_age_days=hit.vuln_age_days,
+                    severity_rank=hit.severity_rank,
+                    scan_run_id=run_id,
+                )
+                if kind == "inserted":
+                    new_count += 1
+
+            db.finish_scan_run(conn, run_id, "completed", None, total, new_count)
+            return run_id, err_note
+
+
 def _scheduled_job() -> None:
     with db.connect(DB_PATH) as conn:
         age = int(db.get_setting(conn, "scan_vuln_age_days", "30") or "30")
@@ -241,6 +280,26 @@ async def action_scan(
     return RedirectResponse(url=url, status_code=303)
 
 
+@app.post("/action/scan/one")
+async def action_scan_one(
+    software_id: int = Form(...),
+    vuln_age_days: int = Form(30),
+) -> RedirectResponse:
+    def _run() -> tuple[int | None, str | None]:
+        return execute_scan_one(software_id, vuln_age_days)
+
+    run_result, err = await asyncio.to_thread(_run)
+    if err and run_result is None:
+        return RedirectResponse(url="/?error=" + quote(err), status_code=303)
+    with db.connect(DB_PATH) as conn:
+        last = db.latest_completed_scan(conn)
+        rid = int(last["id"]) if last else None
+    url = "/"
+    if rid is not None:
+        url = f"/?scan_run={rid}&only_new=1&software_id={software_id}"
+    return RedirectResponse(url=url, status_code=303)
+
+
 @app.post("/action/settings")
 async def action_settings(
     scan_interval_minutes: int = Form(0),
@@ -267,6 +326,15 @@ async def software_upload(file: UploadFile = File(...)) -> RedirectResponse:
     lines = text.splitlines()
     with db.connect(DB_PATH) as conn:
         db.merge_software_lines(conn, lines, "upload")
+    return RedirectResponse(url="/", status_code=303)
+
+
+@app.post("/software/{software_id}/delete")
+async def software_delete(software_id: int) -> RedirectResponse:
+    with db.connect(DB_PATH) as conn:
+        ok = db.delete_software(conn, software_id)
+    if not ok:
+        return RedirectResponse(url="/?error=" + quote("ПО не найдено."), status_code=303)
     return RedirectResponse(url="/", status_code=303)
 
 

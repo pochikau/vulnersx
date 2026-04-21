@@ -165,6 +165,24 @@ def list_software(conn: sqlite3.Connection) -> list[SoftwareRow]:
     return [SoftwareRow(int(r["id"]), r["name"], r["source"], r["created_at"]) for r in rows]
 
 
+def get_software_by_id(conn: sqlite3.Connection, software_id: int) -> SoftwareRow | None:
+    r = conn.execute(
+        "SELECT id, name, source, created_at FROM software WHERE id = ?", (software_id,)
+    ).fetchone()
+    if not r:
+        return None
+    return SoftwareRow(int(r["id"]), r["name"], r["source"], r["created_at"])
+
+
+def delete_software(conn: sqlite3.Connection, software_id: int) -> bool:
+    row = conn.execute("SELECT id FROM software WHERE id = ?", (software_id,)).fetchone()
+    if not row:
+        return False
+    conn.execute("DELETE FROM findings WHERE software_id = ?", (software_id,))
+    conn.execute("DELETE FROM software WHERE id = ?", (software_id,))
+    return True
+
+
 def merge_software_lines(conn: sqlite3.Connection, lines: list[str], source: str) -> int:
     added = 0
     for raw in lines:

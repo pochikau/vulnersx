@@ -226,6 +226,47 @@ body {
     padding-left: 12px;
 }
 
+.software-item-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+}
+
+.software-name {
+    flex: 1;
+    min-width: 0;
+    word-break: break-word;
+}
+
+.software-delete-form {
+    margin: 0;
+    flex-shrink: 0;
+}
+
+.btn-delete {
+    background: transparent;
+    border: 1px solid rgba(255, 51, 85, 0.55);
+    color: var(--critical);
+    padding: 4px 10px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 0.85rem;
+    line-height: 1.2;
+    transition: background 0.2s, box-shadow 0.2s;
+}
+
+.btn-delete:hover {
+    background: rgba(255, 51, 85, 0.12);
+    box-shadow: 0 0 12px rgba(255, 51, 85, 0.2);
+}
+
+.cyber-button:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    box-shadow: none;
+}
+
 .scan-panel {
     margin-top: 0;
 }
