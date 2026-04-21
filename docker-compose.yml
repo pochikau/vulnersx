@@ -1,0 +1,37 @@
+# Запуск: скопируйте .env.example в .env, задайте DOMAIN, EMAIL, VULNX_API_KEY.
+# Порты 80/443 должны быть доступны из интернета для выпуска Let's Encrypt.
+
+services:
+  app:
+    build: .
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+      VULNX_API_KEY: ${VULNX_API_KEY}
+      PDCP_API_KEY: ${VULNX_API_KEY}
+    volumes:
+      - vulnx-data:/data
+    expose:
+      - "8000"
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+      EMAIL: ${EMAIL}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  vulnx-data:
+  caddy_data:
+  caddy_config:

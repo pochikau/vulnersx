@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VULNX · SOC</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="wrap">
+    <header class="hero">
+      <h1>VULNX · управление уязвимостями</h1>
+      <p>Инвентарь ПО → поиск через <span class="mono">vulnx search</span> → статусы и учёт</p>
+    </header>
+
+    {% if page_error %}
+    <div class="alert">{{ page_error }}</div>
+    {% endif %}
+
+    <section class="panel">
+      <h2>Инвентарь ПО</h2>
+      <div class="grid2">
+        <form class="stack" method="post" action="/software/upload" enctype="multipart/form-data">
+          <div>
+            <label>Загрузить список (как software.txt)</label>
+            <input type="file" name="file" accept=".txt,.csv,text/plain" required />
+          </div>
+          <div><button type="submit">Загрузить файл</button></div>
+        </form>
+        <form class="stack" method="post" action="/software/add">
+          <div>
+            <label>Добавить вручную</label>
+            <input type="text" name="name" placeholder="Например: Apache Tomcat" required />
+          </div>
+          <div><button type="submit">Добавить</button></div>
+        </form>
+      </div>
+      {% if software %}
+      <p class="small" style="margin-top:12px;">Записей: {{ software|length }}. Примеры: {% for s in software %}{% if loop.index <= 12 %}<span class="pill">{{ s.name }}</span>{% endif %}{% endfor %}{% if software|length > 12 %} …{% endif %}</p>
+      {% else %}
+      <p class="small" style="margin-top:12px;">Список пуст — загрузите файл или добавьте ПО.</p>
+      {% endif %}
+    </section>
+
+    <section class="panel">
+      <h2>Сканирование</h2>
+      <form method="post" action="/action/scan" class="inline-form">
+        <div>
+          <label>Возраст уязвимости (дней)</label>
+          <select name="vuln_age_days">
+            {% for d in [10, 20, 30, 60, 90, 180] %}
+            <option value="{{ d }}" {% if d|string == scan_vuln_age_days %}selected{% endif %}>{{ d }} дней</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button type="submit">Запустить скан</button>
+        </div>
+      </form>
+      <p class="small">После скана откроется вид «только новые» для последнего завершённого прогона.</p>
+    </section>
+
+    <section class="panel">
+      <h2>Таймер</h2>
+      <form method="post" action="/action/settings" class="inline-form">
+        <div>
+          <label>Интервал (минут, 0 = выкл.)</label>
+          <input type="number" name="scan_interval_minutes" min="0" value="{{ scan_interval_minutes }}" />
+        </div>
+        <div>
+          <label>Возраст для автоскана (дней)</label>
+          <input type="number" name="scan_vuln_age_days" min="1" value="{{ scan_vuln_age_days }}" />
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button type="submit">Сохранить</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="panel">
+      <h2>Фильтры</h2>
+      <form method="get" action="/" class="stack">
+        <div class="grid2">
+          <div>
+            <label>Поиск по CVE или ПО</label>
+            <input type="text" name="q" value="{{ q }}" placeholder="CVE-2025-… или часть названия" />
+          </div>
+          <div>
+            <label>Статус</label>
+            <select name="status">
+              <option value="all" {% if status_filter == 'all' %}selected{% endif %}>Все</option>
+              <option value="new" {% if status_filter == 'new' %}selected{% endif %}>Новая</option>
+              <option value="in_progress" {% if status_filter == 'in_progress' %}selected{% endif %}>В работе</option>
+              <option value="closed" {% if status_filter == 'closed' %}selected{% endif %}>Закрыто</option>
+            </select>
+          </div>
+        </div>
+        <div>
+          <label class="small">
+            <input type="checkbox" name="only_new" value="1" {% if only_new %}checked{% endif %} />
+            Показывать только новые для выбранного прогона (по умолчанию — последний завершённый{% if latest_scan_id %}, #{{ latest_scan_id }}{% endif %})
+          </label>
+        </div>
+        {% if scan_run %}
+        <input type="hidden" name="scan_run" value="{{ scan_run }}" />
+        {% endif %}
+        <div>
+          <button type="submit">Применить</button>
+          <a class="btn btn-secondary" href="/">Сбросить</a>
+          <a class="btn" href="/export.csv{% if request.url.query %}?{{ request.url.query }}{% endif %}">CSV</a>
+        </div>
+      </form>
+    </section>
+
+    <section class="panel">
+      <h2>Найденные уязвимости</h2>
+      {% if findings %}
+      <div style="overflow-x:auto;">
+        <table>
+          <thead>
+            <tr>
+              <th>CVE</th>
+              <th>ПО</th>
+              <th>Серьёзность</th>
+              <th>Заголовок</th>
+              <th>Управление</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for f in findings %}
+            <tr class="row-{{ f.status }}">
+              <td class="mono">{{ f.cve_id }}</td>
+              <td>{{ f.software_name }}</td>
+              <td>{{ f.severity or "—" }}</td>
+              <td>{{ f.title or "—" }}</td>
+              <td>
+                <form method="post" action="/finding/{{ f.id }}/update" class="stack">
+                  <select name="status">
+                    <option value="new" {% if f.status == 'new' %}selected{% endif %}>Новая</option>
+                    <option value="in_progress" {% if f.status == 'in_progress' %}selected{% endif %}>В работе</option>
+                    <option value="closed" {% if f.status == 'closed' %}selected{% endif %}>Закрыто</option>
+                  </select>
+                  <input type="text" name="comment" value="{{ f.comment or '' }}" placeholder="Комментарий, напр. vulnm-1234" />
+                  <button type="submit">Сохранить</button>
+                </form>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <p class="small">Пока нет записей — выполните скан или ослабьте фильтры.</p>
+      {% endif %}
+    </section>
+
+    <section class="panel">
+      <h2>Последние прогоны</h2>
+      {% if scans %}
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Старт</th>
+            <th>Окно (дней)</th>
+            <th>Статус</th>
+            <th>Всего / новых</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for s in scans %}
+          <tr>
+            <td class="mono">{{ s.id }}</td>
+            <td>{{ s.started_at }}</td>
+            <td>{{ s.vuln_age_days }}</td>
+            <td>{{ s.status }}{% if s.error %} — {{ s.error }}{% endif %}</td>
+            <td>{{ s.findings_count }} / {{ s.new_findings_count }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="small">Прогонов ещё не было.</p>
+      {% endif %}
+    </section>
+  </div>
+</body>
+</html>
