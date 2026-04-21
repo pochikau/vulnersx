@@ -125,7 +125,13 @@
             </div>
 
             <form method="get" action="/" class="filters" style="margin-bottom:14px;">
-              <input type="text" name="q" value="{{ q }}" placeholder="CVE / software / raw" class="cyber-input" style="flex:2;min-width:200px;" />
+              <select name="software_id" class="cyber-select small" title="Фильтр по ПО">
+                <option value="">Все ПО</option>
+                {% for s in software %}
+                <option value="{{ s.id }}" {% if software_filter == s.id %}selected{% endif %}>{{ s.name }}</option>
+                {% endfor %}
+              </select>
+              <input type="text" name="q" value="{{ q }}" placeholder="CVE / текст в raw" class="cyber-input" style="flex:2;min-width:200px;" />
               <select name="status" class="cyber-select small">
                 <option value="all" {% if status_filter == 'all' %}selected{% endif %}>All Status</option>
                 <option value="new" {% if status_filter == 'new' %}selected{% endif %}>New</option>

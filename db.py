@@ -316,6 +316,7 @@ def fetch_findings(
     only_new_from_scan: int | None,
     sort_by: str = "cvss",
     sort_order: str = "desc",
+    software_id: int | None = None,
 ) -> list[sqlite3.Row]:
     where: list[str] = ["1=1"]
     params: list[Any] = []
@@ -329,6 +330,9 @@ def fetch_findings(
     if only_new_from_scan is not None:
         where.append("f.first_seen_scan_id = ?")
         params.append(only_new_from_scan)
+    if software_id is not None:
+        where.append("f.software_id = ?")
+        params.append(software_id)
 
     order = "DESC" if sort_order.lower() != "asc" else "ASC"
     sort_by = (sort_by or "cvss").lower()

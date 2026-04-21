@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -159,6 +159,7 @@ async def dashboard(
     error: str | None = None,
     sort: str = "cvss",
     order: str = "desc",
+    software_id: int | None = Query(None),
 ) -> Any:
     with db.connect(DB_PATH) as conn:
         sw = db.list_software(conn)
@@ -181,6 +182,7 @@ async def dashboard(
             only_new_from_scan=only_id,
             sort_by=sort,
             sort_order=order,
+            software_id=software_id,
         )
 
         last_scan_label = "NEVER"
@@ -215,6 +217,7 @@ async def dashboard(
             "last_scan_label": last_scan_label,
             "threat_level": threat_level,
             "threat_class": threat_class,
+            "software_filter": software_id,
         },
     )
 
@@ -293,6 +296,7 @@ async def export_csv(
     only_new: str | None = None,
     sort: str = "cvss",
     order: str = "desc",
+    software_id: int | None = Query(None),
 ) -> StreamingResponse:
     only_id: int | None = None
     with db.connect(DB_PATH) as conn:
@@ -310,6 +314,7 @@ async def export_csv(
             only_new_from_scan=only_id,
             sort_by=sort,
             sort_order=order,
+            software_id=software_id,
         )
 
     buf = io.StringIO()
