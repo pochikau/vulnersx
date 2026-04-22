@@ -330,6 +330,51 @@ body {
     background: rgba(0, 255, 213, 0.06);
 }
 
+.scan-live-status {
+    border: 1px solid var(--border-glow);
+    padding: 10px 12px;
+    margin-bottom: 12px;
+    background: rgba(0, 255, 213, 0.05);
+    font-size: 0.86rem;
+}
+
+.small-line {
+    color: var(--muted);
+    font-size: 0.8rem;
+}
+
+.btn-stop {
+    border-color: var(--critical);
+    color: var(--critical);
+}
+
+.btn-stop:hover {
+    background: rgba(255, 51, 85, 0.12);
+    box-shadow: 0 0 20px rgba(255, 51, 85, 0.25);
+}
+
+.scan-live-new {
+    margin-top: 10px;
+    max-height: 180px;
+    overflow-y: auto;
+    border: 1px solid rgba(0, 255, 213, 0.2);
+    background: rgba(0, 0, 0, 0.25);
+}
+
+.live-title {
+    padding: 8px 10px;
+    border-bottom: 1px solid rgba(0, 255, 213, 0.2);
+    color: var(--primary);
+    font-size: 0.8rem;
+}
+
+.live-item {
+    padding: 6px 10px;
+    font-size: 0.78rem;
+    border-bottom: 1px dashed rgba(0, 255, 213, 0.12);
+    color: #d4fff7;
+}
+
 .vuln-list {
     max-height: 640px;
     overflow-y: auto;

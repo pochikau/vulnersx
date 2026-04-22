@@ -18,7 +18,7 @@ from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI, File, Form, Query, Request, UploadFile
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -37,6 +37,7 @@ TEMPLATES = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 SCAN_LOCK = threading.Lock()
 scheduler: BackgroundScheduler | None = None
+SCAN_THREAD: threading.Thread | None = None
 
 
 def _env_api_key() -> str | None:
@@ -60,28 +61,38 @@ def _configure_vulnx_auth() -> None:
         pass
 
 
-def execute_scan(vuln_age_days: int) -> tuple[int | None, str | None]:
-    """
-    Runs a full inventory scan. Returns (scan_run_id, error_message).
-    """
+def _scan_worker(run_id: int, software_ids: list[int], vuln_age_days: int) -> None:
+    err_note: str | None = None
     with SCAN_LOCK:
         with db.connect(DB_PATH) as conn:
-            software = db.list_software(conn)
+            software_rows = [db.get_software_by_id(conn, sid) for sid in software_ids]
+            software = [s for s in software_rows if s is not None]
+            db.initialize_scan_progress(conn, run_id, len(software))
             if not software:
-                return None, "Список ПО пуст — добавьте записи или загрузите файл."
-
-            run_id = db.start_scan_run(conn, vuln_age_days)
-
-            new_count = 0
-            total = 0
-            err_note: str | None = None
+                db.finish_scan_run(conn, run_id, "failed", "empty software list", 0, 0)
+                return
 
             for sw in software:
+                if db.is_scan_cancel_requested(conn, run_id):
+                    db.finish_scan_run(
+                        conn,
+                        run_id,
+                        "cancelled",
+                        "scan cancelled by user",
+                        int(conn.execute("SELECT findings_count FROM scan_runs WHERE id = ?", (run_id,)).fetchone()[0]),
+                        int(conn.execute("SELECT new_findings_count FROM scan_runs WHERE id = ?", (run_id,)).fetchone()[0]),
+                    )
+                    return
+
+                db.set_scan_current_software(conn, run_id, sw.name)
                 hits, serr = run_search(sw.name, vuln_age_days)
                 if serr:
                     err_note = err_note or serr
+
+                hits_count = 0
+                new_hits_count = 0
                 for hit in hits:
-                    total += 1
+                    hits_count += 1
                     kind = db.upsert_finding(
                         conn,
                         cve_id=hit.cve_id,
@@ -96,57 +107,71 @@ def execute_scan(vuln_age_days: int) -> tuple[int | None, str | None]:
                         severity_rank=hit.severity_rank,
                         scan_run_id=run_id,
                     )
-                    if kind == "inserted":
-                        new_count += 1
-
-            db.finish_scan_run(conn, run_id, "completed", None, total, new_count)
-            return run_id, err_note
-
-
-def execute_scan_one(software_id: int, vuln_age_days: int) -> tuple[int | None, str | None]:
-    """Сканирование одного выбранного ПО по id."""
-    with SCAN_LOCK:
-        with db.connect(DB_PATH) as conn:
-            sw = db.get_software_by_id(conn, software_id)
-            if sw is None:
-                return None, "Указанное ПО не найдено в базе."
-
-            run_id = db.start_scan_run(conn, vuln_age_days)
-            new_count = 0
-            total = 0
-            err_note: str | None = None
-
-            hits, serr = run_search(sw.name, vuln_age_days)
-            if serr:
-                err_note = serr
-            for hit in hits:
-                total += 1
-                kind = db.upsert_finding(
+                    is_new = kind == "inserted"
+                    if is_new:
+                        new_hits_count += 1
+                    fid = db.get_finding_id(conn, hit.cve_id, sw.id)
+                    db.append_scan_finding(
+                        conn,
+                        scan_run_id=run_id,
+                        finding_id=fid,
+                        cve_id=hit.cve_id,
+                        software_name=sw.name,
+                        title=hit.title,
+                        severity=hit.severity,
+                        cvss_score=hit.cvss_score,
+                        epss_score=hit.epss_score,
+                        vuln_age_days=hit.vuln_age_days,
+                        raw_output=hit.raw_output,
+                        is_new=is_new,
+                    )
+                db.increment_scan_progress(
                     conn,
-                    cve_id=hit.cve_id,
-                    software_id=sw.id,
-                    title=hit.title,
-                    severity=hit.severity,
-                    summary=hit.summary,
-                    raw_output=hit.raw_output,
-                    cvss_score=hit.cvss_score,
-                    epss_score=hit.epss_score,
-                    vuln_age_days=hit.vuln_age_days,
-                    severity_rank=hit.severity_rank,
-                    scan_run_id=run_id,
+                    run_id,
+                    processed_software_inc=1,
+                    findings_inc=hits_count,
+                    new_findings_inc=new_hits_count,
                 )
-                if kind == "inserted":
-                    new_count += 1
 
-            db.finish_scan_run(conn, run_id, "completed", None, total, new_count)
-            return run_id, err_note
+            totals = conn.execute(
+                "SELECT findings_count, new_findings_count FROM scan_runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+            db.finish_scan_run(
+                conn,
+                run_id,
+                "completed",
+                err_note,
+                int(totals["findings_count"]) if totals else 0,
+                int(totals["new_findings_count"]) if totals else 0,
+            )
+
+
+def start_scan_async(vuln_age_days: int, software_ids: list[int]) -> tuple[int | None, str | None]:
+    global SCAN_THREAD
+    with db.connect(DB_PATH) as conn:
+        running = db.get_running_scan(conn)
+        if running:
+            return None, "Скан уже выполняется. Остановите текущий прогон или дождитесь завершения."
+        if not software_ids:
+            return None, "Список ПО пуст — добавьте записи или загрузите файл."
+        run_id = db.start_scan_run(conn, vuln_age_days)
+    SCAN_THREAD = threading.Thread(
+        target=_scan_worker,
+        args=(run_id, software_ids, vuln_age_days),
+        daemon=True,
+        name=f"scan-run-{run_id}",
+    )
+    SCAN_THREAD.start()
+    return run_id, None
 
 
 def _scheduled_job() -> None:
     with db.connect(DB_PATH) as conn:
         age = int(db.get_setting(conn, "scan_vuln_age_days", "30") or "30")
+        software_ids = [s.id for s in db.list_software(conn)]
     try:
-        execute_scan(max(1, age))
+        start_scan_async(max(1, age), software_ids)
     except Exception:
         pass
 
@@ -211,6 +236,7 @@ async def dashboard(
         interval = db.get_setting(conn, "scan_interval_minutes", "0")
         age_default = db.get_setting(conn, "scan_vuln_age_days", "30")
         scans = db.list_recent_scans(conn, 25)
+        running_scan = db.get_running_scan(conn)
         latest = db.latest_completed_scan(conn)
         latest_scan_id = int(latest["id"]) if latest else None
         stats = db.count_findings_by_status(conn)
@@ -263,6 +289,7 @@ async def dashboard(
             "threat_level": threat_level,
             "threat_class": threat_class,
             "software_filter": software_id,
+            "running_scan": running_scan,
         },
     )
 
@@ -271,18 +298,12 @@ async def dashboard(
 async def action_scan(
     vuln_age_days: int = Form(30),
 ) -> RedirectResponse:
-    def _run() -> tuple[int | None, str | None]:
-        return execute_scan(vuln_age_days)
-
-    run_result, err = await asyncio.to_thread(_run)
-    if err and run_result is None:
-        return RedirectResponse(url="/?error=" + quote(err), status_code=303)
     with db.connect(DB_PATH) as conn:
-        last = db.latest_completed_scan(conn)
-        rid = int(last["id"]) if last else None
-    url = "/"
-    if rid is not None:
-        url = f"/?scan_run={rid}&only_new=1"
+        ids = [s.id for s in db.list_software(conn)]
+    run_result, err = start_scan_async(vuln_age_days, ids)
+    if err or run_result is None:
+        return RedirectResponse(url="/?error=" + quote(err), status_code=303)
+    url = f"/?scan_run={run_result}&only_new=1"
     return RedirectResponse(url=url, status_code=303)
 
 
@@ -291,18 +312,10 @@ async def action_scan_one(
     software_id: int = Form(...),
     vuln_age_days: int = Form(30),
 ) -> RedirectResponse:
-    def _run() -> tuple[int | None, str | None]:
-        return execute_scan_one(software_id, vuln_age_days)
-
-    run_result, err = await asyncio.to_thread(_run)
-    if err and run_result is None:
+    run_result, err = start_scan_async(vuln_age_days, [software_id])
+    if err or run_result is None:
         return RedirectResponse(url="/?error=" + quote(err), status_code=303)
-    with db.connect(DB_PATH) as conn:
-        last = db.latest_completed_scan(conn)
-        rid = int(last["id"]) if last else None
-    url = "/"
-    if rid is not None:
-        url = f"/?scan_run={rid}&only_new=1&software_id={software_id}"
+    url = f"/?scan_run={run_result}&only_new=1&software_id={software_id}"
     return RedirectResponse(url=url, status_code=303)
 
 
@@ -342,6 +355,48 @@ async def software_delete(software_id: int) -> RedirectResponse:
     if not ok:
         return RedirectResponse(url="/?error=" + quote("ПО не найдено."), status_code=303)
     return RedirectResponse(url="/", status_code=303)
+
+
+@app.post("/action/scan/stop")
+async def action_scan_stop() -> RedirectResponse:
+    with db.connect(DB_PATH) as conn:
+        running = db.get_running_scan(conn)
+        if running:
+            db.request_cancel_scan(conn, int(running["id"]))
+    return RedirectResponse(url="/", status_code=303)
+
+
+@app.get("/api/scan/status")
+async def api_scan_status() -> JSONResponse:
+    with db.connect(DB_PATH) as conn:
+        running = db.get_running_scan(conn)
+        if not running:
+            return JSONResponse({"running": False})
+        run_id = int(running["id"])
+        new_rows = db.list_new_scan_findings(conn, run_id, 20)
+        return JSONResponse(
+            {
+                "running": True,
+                "run_id": run_id,
+                "started_at": running["started_at"],
+                "vuln_age_days": int(running["vuln_age_days"]),
+                "processed_software": int(running["processed_software"] or 0),
+                "total_software": int(running["total_software"] or 0),
+                "findings_count": int(running["findings_count"] or 0),
+                "new_findings_count": int(running["new_findings_count"] or 0),
+                "current_software": running["current_software"] or "",
+                "cancel_requested": bool(int(running["cancel_requested"] or 0)),
+                "new_items": [
+                    {
+                        "cve_id": r["cve_id"],
+                        "software_name": r["software_name"],
+                        "severity": r["severity"] or "",
+                        "title": r["title"] or "",
+                    }
+                    for r in new_rows
+                ],
+            }
+        )
 
 
 def _safe_next(url: str | None) -> str:
@@ -400,6 +455,61 @@ async def export_csv(
         w.writerow(old_data_csv_row(r, parsed, raw_full))
     buf.seek(0)
     fname = f"vuln_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@app.get("/scan/{run_id}/export.csv")
+async def export_scan_run_csv(run_id: int) -> StreamingResponse:
+    with db.connect(DB_PATH) as conn:
+        run = db.get_scan_run(conn, run_id)
+        rows = db.list_scan_findings(conn, run_id)
+    if run is None:
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["error"])
+        w.writerow([f"scan run {run_id} not found"])
+        buf.seek(0)
+        return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv; charset=utf-8")
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(
+        [
+            "scan_run_id",
+            "seen_at",
+            "is_new",
+            "cve_id",
+            "software",
+            "severity",
+            "title",
+            "cvss_score",
+            "epss_score",
+            "vuln_age_days",
+            "raw_output",
+        ]
+    )
+    for r in rows:
+        w.writerow(
+            [
+                run_id,
+                r["seen_at"],
+                "Yes" if int(r["is_new"] or 0) == 1 else "No",
+                r["cve_id"],
+                r["software_name"],
+                r["severity"] or "",
+                r["title"] or "",
+                r["cvss_score"] if r["cvss_score"] is not None else "",
+                r["epss_score"] if r["epss_score"] is not None else "",
+                r["vuln_age_days"] if r["vuln_age_days"] is not None else "",
+                r["raw_output"] or "",
+            ]
+        )
+    buf.seek(0)
+    fname = f"scan_{run_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     return StreamingResponse(
         iter([buf.getvalue()]),
         media_type="text/csv; charset=utf-8",

@@ -25,7 +25,11 @@ CREATE TABLE IF NOT EXISTS scan_runs (
     status TEXT NOT NULL,
     error TEXT,
     findings_count INTEGER DEFAULT 0,
-    new_findings_count INTEGER DEFAULT 0
+    new_findings_count INTEGER DEFAULT 0,
+    total_software INTEGER DEFAULT 0,
+    processed_software INTEGER DEFAULT 0,
+    current_software TEXT,
+    cancel_requested INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS findings (
@@ -57,10 +61,28 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS scan_findings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_run_id INTEGER NOT NULL,
+    finding_id INTEGER,
+    cve_id TEXT NOT NULL,
+    software_name TEXT NOT NULL,
+    title TEXT,
+    severity TEXT,
+    cvss_score REAL,
+    epss_score REAL,
+    vuln_age_days INTEGER,
+    raw_output TEXT,
+    is_new INTEGER NOT NULL DEFAULT 0,
+    seen_at TEXT NOT NULL,
+    FOREIGN KEY (scan_run_id) REFERENCES scan_runs(id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_findings_cve ON findings(cve_id);
 CREATE INDEX IF NOT EXISTS idx_findings_status ON findings(status);
 CREATE INDEX IF NOT EXISTS idx_findings_first_scan ON findings(first_seen_scan_id);
 CREATE INDEX IF NOT EXISTS idx_software_name ON software(name);
+CREATE INDEX IF NOT EXISTS idx_scan_findings_run_id ON scan_findings(scan_run_id);
 """
 
 
@@ -103,10 +125,26 @@ def migrate_findings(conn: sqlite3.Connection) -> None:
         conn.execute(sql)
 
 
+def migrate_scan_runs(conn: sqlite3.Connection) -> None:
+    cols = _table_columns(conn, "scan_runs")
+    alters: list[str] = []
+    if "total_software" not in cols:
+        alters.append("ALTER TABLE scan_runs ADD COLUMN total_software INTEGER DEFAULT 0")
+    if "processed_software" not in cols:
+        alters.append("ALTER TABLE scan_runs ADD COLUMN processed_software INTEGER DEFAULT 0")
+    if "current_software" not in cols:
+        alters.append("ALTER TABLE scan_runs ADD COLUMN current_software TEXT")
+    if "cancel_requested" not in cols:
+        alters.append("ALTER TABLE scan_runs ADD COLUMN cancel_requested INTEGER DEFAULT 0")
+    for sql in alters:
+        conn.execute(sql)
+
+
 def init_db(db_path: Path) -> None:
     with connect(db_path) as conn:
         conn.executescript(SCHEMA)
         migrate_findings(conn)
+        migrate_scan_runs(conn)
         cur = conn.execute("SELECT COUNT(*) FROM settings WHERE key = 'scan_interval_minutes'")
         if cur.fetchone()[0] == 0:
             conn.execute(
@@ -213,6 +251,63 @@ def start_scan_run(conn: sqlite3.Connection, vuln_age_days: int) -> int:
     return int(rid)
 
 
+def initialize_scan_progress(conn: sqlite3.Connection, run_id: int, total_software: int) -> None:
+    conn.execute(
+        """
+        UPDATE scan_runs
+        SET total_software = ?, processed_software = 0, current_software = NULL,
+            findings_count = 0, new_findings_count = 0, cancel_requested = 0
+        WHERE id = ?
+        """,
+        (int(total_software), run_id),
+    )
+
+
+def set_scan_current_software(conn: sqlite3.Connection, run_id: int, software_name: str) -> None:
+    conn.execute(
+        "UPDATE scan_runs SET current_software = ? WHERE id = ?",
+        (software_name, run_id),
+    )
+
+
+def increment_scan_progress(
+    conn: sqlite3.Connection,
+    run_id: int,
+    *,
+    processed_software_inc: int = 0,
+    findings_inc: int = 0,
+    new_findings_inc: int = 0,
+) -> None:
+    conn.execute(
+        """
+        UPDATE scan_runs
+        SET processed_software = processed_software + ?,
+            findings_count = findings_count + ?,
+            new_findings_count = new_findings_count + ?
+        WHERE id = ?
+        """,
+        (processed_software_inc, findings_inc, new_findings_inc, run_id),
+    )
+
+
+def request_cancel_scan(conn: sqlite3.Connection, run_id: int) -> None:
+    conn.execute("UPDATE scan_runs SET cancel_requested = 1 WHERE id = ?", (run_id,))
+
+
+def is_scan_cancel_requested(conn: sqlite3.Connection, run_id: int) -> bool:
+    row = conn.execute(
+        "SELECT cancel_requested FROM scan_runs WHERE id = ?",
+        (run_id,),
+    ).fetchone()
+    return bool(row and int(row["cancel_requested"]) == 1)
+
+
+def get_running_scan(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM scan_runs WHERE status = 'running' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+
+
 def finish_scan_run(
     conn: sqlite3.Connection,
     run_id: int,
@@ -311,6 +406,80 @@ def upsert_finding(
         ),
     )
     return "updated"
+
+
+def get_finding_id(conn: sqlite3.Connection, cve_id: str, software_id: int) -> int | None:
+    row = conn.execute(
+        "SELECT id FROM findings WHERE cve_id = ? AND software_id = ?",
+        (cve_id.strip().upper(), software_id),
+    ).fetchone()
+    return int(row["id"]) if row else None
+
+
+def append_scan_finding(
+    conn: sqlite3.Connection,
+    *,
+    scan_run_id: int,
+    finding_id: int | None,
+    cve_id: str,
+    software_name: str,
+    title: str | None,
+    severity: str | None,
+    cvss_score: float | None,
+    epss_score: float | None,
+    vuln_age_days: int | None,
+    raw_output: str | None,
+    is_new: bool,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO scan_findings (
+            scan_run_id, finding_id, cve_id, software_name, title, severity,
+            cvss_score, epss_score, vuln_age_days, raw_output, is_new, seen_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            scan_run_id,
+            finding_id,
+            cve_id.strip().upper(),
+            software_name,
+            title,
+            severity,
+            cvss_score,
+            epss_score,
+            vuln_age_days,
+            raw_output,
+            1 if is_new else 0,
+            utc_now_iso(),
+        ),
+    )
+
+
+def list_scan_findings(conn: sqlite3.Connection, scan_run_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT * FROM scan_findings
+        WHERE scan_run_id = ?
+        ORDER BY id ASC
+        """,
+        (scan_run_id,),
+    ).fetchall()
+
+
+def list_new_scan_findings(conn: sqlite3.Connection, scan_run_id: int, limit: int = 20) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT * FROM scan_findings
+        WHERE scan_run_id = ? AND is_new = 1
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (scan_run_id, int(limit)),
+    ).fetchall()
+
+
+def get_scan_run(conn: sqlite3.Connection, run_id: int) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM scan_runs WHERE id = ?", (run_id,)).fetchone()
 
 
 def update_finding_status(

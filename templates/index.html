@@ -76,6 +76,16 @@
             <div class="panel-header">
               <h2>SCAN CONTROLS</h2>
             </div>
+            <div id="scan-live-status" class="scan-live-status">
+              {% if running_scan %}
+              <div><strong>RUNNING</strong> #{{ running_scan.id }}</div>
+              <div class="small-line">ПО: {{ running_scan.processed_software }} / {{ running_scan.total_software }}</div>
+              <div class="small-line">Current: {{ running_scan.current_software or "..." }}</div>
+              <div class="small-line">Findings: {{ running_scan.findings_count }} | New: {{ running_scan.new_findings_count }}</div>
+              {% else %}
+              <div><strong>IDLE</strong> — скан не выполняется</div>
+              {% endif %}
+            </div>
             <form method="post" action="/action/scan/one" style="margin-bottom:16px;">
               <label class="stat-label" style="display:block;margin-bottom:6px;">ПО для скана</label>
               <select name="software_id" class="cyber-select" required>
@@ -101,7 +111,11 @@
               </select>
               <button type="submit" class="cyber-button">SCAN ALL SOFTWARE</button>
             </form>
+            <form method="post" action="/action/scan/stop">
+              <button type="submit" class="cyber-button btn-stop">STOP SCAN</button>
+            </form>
             <p class="stat-label" style="margin-top:10px;opacity:.85;">После скана открывается вид «только новые» последнего прогона; для одиночного скана список справа фильтруется по этому ПО.</p>
+            <div id="scan-live-new" class="scan-live-new"></div>
           </div>
 
           <div class="schedule-panel cyber-panel">
@@ -123,7 +137,7 @@
             <div style="max-height:220px;overflow:auto;font-size:0.82rem;">
               {% for s in scans[:12] %}
               <div style="border-bottom:1px solid rgba(187,0,255,.2);padding:6px 0;">
-                <div>#{{ s.id }} · {{ s.status }} · age &lt;{{ s.vuln_age_days }}d</div>
+                <div>#{{ s.id }} · {{ s.status }} · age &lt;{{ s.vuln_age_days }}d · <a href="/scan/{{ s.id }}/export.csv">download</a></div>
                 <div style="opacity:.75;">{{ s.started_at }} → hits {{ s.findings_count }} / new {{ s.new_findings_count }}</div>
               </div>
               {% endfor %}
@@ -214,5 +228,43 @@
       </div>
     </div>
   </div>
+  <script>
+    (function () {
+      const statusEl = document.getElementById("scan-live-status");
+      const newEl = document.getElementById("scan-live-new");
+      let tick = null;
+      async function poll() {
+        try {
+          const res = await fetch("/api/scan/status", { cache: "no-store" });
+          if (!res.ok) return;
+          const data = await res.json();
+          if (!data.running) {
+            statusEl.innerHTML = "<div><strong>IDLE</strong> — скан не выполняется</div>";
+            newEl.innerHTML = "";
+            if (tick) { clearInterval(tick); tick = null; }
+            return;
+          }
+          statusEl.innerHTML = `
+            <div><strong>RUNNING</strong> #${data.run_id}</div>
+            <div class="small-line">ПО: ${data.processed_software} / ${data.total_software}</div>
+            <div class="small-line">Current: ${data.current_software || "..."}</div>
+            <div class="small-line">Findings: ${data.findings_count} | New: ${data.new_findings_count}</div>
+            <div class="small-line">${data.cancel_requested ? "Stop requested..." : ""}</div>
+          `;
+          const items = Array.isArray(data.new_items) ? data.new_items : [];
+          if (items.length) {
+            newEl.innerHTML = `
+              <div class="live-title">Новые во время скана</div>
+              ${items.slice(0, 12).map(i => `<div class="live-item">[${i.cve_id}] ${i.severity || ""} - ${i.software_name}</div>`).join("")}
+            `;
+          } else {
+            newEl.innerHTML = "";
+          }
+        } catch (_) {}
+      }
+      tick = setInterval(poll, 2500);
+      poll();
+    })();
+  </script>
 </body>
 </html>
