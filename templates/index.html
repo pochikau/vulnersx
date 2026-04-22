@@ -168,6 +168,7 @@
       let tick = null;
       let lastRunId = null;
       let wasRunning = false;
+      let refreshedForRunId = null;
       async function refreshRightPanel() {
         const qs = window.location.search || "";
         const res = await fetch(`/partial/vuln-panel${qs}`, { cache: "no-store" });
@@ -187,19 +188,19 @@
             progressWrapEl.classList.remove("active");
             progressBarEl.style.width = "0%";
             progressTextEl.textContent = "";
-            if (wasRunning && lastRunId !== null) {
+            if (wasRunning && lastRunId !== null && refreshedForRunId !== lastRunId) {
+              refreshedForRunId = lastRunId;
               await refreshRightPanel();
-              return;
             }
             wasRunning = false;
-            if (tick) { clearInterval(tick); tick = null; }
             return;
           }
           wasRunning = true;
           lastRunId = data.run_id;
           const total = Math.max(0, Number(data.total_software || 0));
           const processed = Math.max(0, Number(data.processed_software || 0));
-          const pct = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0;
+          const rawPct = total > 0 ? Math.round((processed / total) * 100) : 0;
+          const pct = Math.min(100, Math.max(2, rawPct));
           progressWrapEl.classList.add("active");
           progressBarEl.style.width = `${pct}%`;
           progressTextEl.textContent = `Progress: ${processed}/${total} (${pct}%)`;
@@ -221,7 +222,7 @@
           }
         } catch (_) {}
       }
-      tick = setInterval(poll, 2500);
+      tick = setInterval(poll, 1500);
       poll();
     })();
   </script>
