@@ -219,6 +219,18 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def _parse_optional_int_param(value: str | None) -> int | None:
+    if value is None:
+        return None
+    v = value.strip()
+    if not v:
+        return None
+    try:
+        return int(v)
+    except ValueError:
+        return None
+
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(
     request: Request,
@@ -229,8 +241,9 @@ async def dashboard(
     error: str | None = None,
     sort: str = "cvss",
     order: str = "desc",
-    software_id: int | None = Query(None),
+    software_id: str | None = Query(None),
 ) -> Any:
+    software_id_int = _parse_optional_int_param(software_id)
     query_string = request.url.query or ""
     with db.connect(DB_PATH) as conn:
         sw = db.list_software(conn)
@@ -254,7 +267,7 @@ async def dashboard(
             only_new_from_scan=only_id,
             sort_by=sort,
             sort_order=order,
-            software_id=software_id,
+            software_id=software_id_int,
         )
 
         last_scan_label = "NEVER"
@@ -289,7 +302,7 @@ async def dashboard(
             "last_scan_label": last_scan_label,
             "threat_level": threat_level,
             "threat_class": threat_class,
-            "software_filter": software_id,
+            "software_filter": software_id_int,
             "running_scan": running_scan,
             "query_string": query_string,
         },
@@ -305,8 +318,9 @@ async def partial_vuln_panel(
     only_new: str | None = None,
     sort: str = "cvss",
     order: str = "desc",
-    software_id: int | None = Query(None),
+    software_id: str | None = Query(None),
 ) -> Any:
+    software_id_int = _parse_optional_int_param(software_id)
     with db.connect(DB_PATH) as conn:
         sw = db.list_software(conn)
         latest = db.latest_completed_scan(conn)
@@ -322,7 +336,7 @@ async def partial_vuln_panel(
             only_new_from_scan=only_id,
             sort_by=sort,
             sort_order=order,
-            software_id=software_id,
+            software_id=software_id_int,
         )
     return TEMPLATES.TemplateResponse(
         "partials/vuln_panel.html",
@@ -336,7 +350,7 @@ async def partial_vuln_panel(
             "only_new": only_new == "1",
             "sort": sort,
             "order": order,
-            "software_filter": software_id,
+            "software_filter": software_id_int,
             "query_string": request.url.query or "",
         },
     )
@@ -473,8 +487,9 @@ async def export_csv(
     only_new: str | None = None,
     sort: str = "cvss",
     order: str = "desc",
-    software_id: int | None = Query(None),
+    software_id: str | None = Query(None),
 ) -> StreamingResponse:
+    software_id_int = _parse_optional_int_param(software_id)
     only_id: int | None = None
     with db.connect(DB_PATH) as conn:
         if only_new == "1":
@@ -491,7 +506,7 @@ async def export_csv(
             only_new_from_scan=only_id,
             sort_by=sort,
             sort_order=order,
-            software_id=software_id,
+            software_id=software_id_int,
         )
 
     buf = io.StringIO()
