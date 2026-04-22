@@ -231,6 +231,7 @@ async def dashboard(
     order: str = "desc",
     software_id: int | None = Query(None),
 ) -> Any:
+    query_string = request.url.query or ""
     with db.connect(DB_PATH) as conn:
         sw = db.list_software(conn)
         interval = db.get_setting(conn, "scan_interval_minutes", "0")
@@ -290,6 +291,53 @@ async def dashboard(
             "threat_class": threat_class,
             "software_filter": software_id,
             "running_scan": running_scan,
+            "query_string": query_string,
+        },
+    )
+
+
+@app.get("/partial/vuln-panel", response_class=HTMLResponse)
+async def partial_vuln_panel(
+    request: Request,
+    q: str | None = None,
+    status: str | None = None,
+    scan_run: int | None = None,
+    only_new: str | None = None,
+    sort: str = "cvss",
+    order: str = "desc",
+    software_id: int | None = Query(None),
+) -> Any:
+    with db.connect(DB_PATH) as conn:
+        sw = db.list_software(conn)
+        latest = db.latest_completed_scan(conn)
+        latest_scan_id = int(latest["id"]) if latest else None
+        only_id: int | None = None
+        effective_scan = scan_run if scan_run is not None else latest_scan_id
+        if only_new == "1" and effective_scan is not None:
+            only_id = effective_scan
+        rows = db.fetch_findings(
+            conn,
+            q=q,
+            status=status if status else None,
+            only_new_from_scan=only_id,
+            sort_by=sort,
+            sort_order=order,
+            software_id=software_id,
+        )
+    return TEMPLATES.TemplateResponse(
+        "partials/vuln_panel.html",
+        {
+            "request": request,
+            "software": sw,
+            "findings": rows,
+            "q": q or "",
+            "status_filter": status or "all",
+            "scan_run": scan_run,
+            "only_new": only_new == "1",
+            "sort": sort,
+            "order": order,
+            "software_filter": software_id,
+            "query_string": request.url.query or "",
         },
     )
 

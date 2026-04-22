@@ -1,0 +1,75 @@
+<div class="vuln-panel cyber-panel">
+  <div class="panel-header">
+    <h2>VULNERABILITY DATABASE</h2>
+    <div class="button-group">
+      <a class="cyber-button small" href="/export.csv{% if query_string %}?{{ query_string }}{% endif %}">EXPORT CSV</a>
+    </div>
+  </div>
+
+  <form method="get" action="/" class="filters" style="margin-bottom:14px;">
+    <select name="software_id" class="cyber-select small" title="Фильтр по ПО">
+      <option value="">Все ПО</option>
+      {% for s in software %}
+      <option value="{{ s.id }}" {% if software_filter == s.id %}selected{% endif %}>{{ s.name }}</option>
+      {% endfor %}
+    </select>
+    <input type="text" name="q" value="{{ q }}" placeholder="CVE / текст в raw" class="cyber-input" style="flex:2;min-width:200px;" />
+    <select name="status" class="cyber-select small">
+      <option value="all" {% if status_filter == 'all' %}selected{% endif %}>All Status</option>
+      <option value="new" {% if status_filter == 'new' %}selected{% endif %}>New</option>
+      <option value="in_progress" {% if status_filter == 'in_progress' %}selected{% endif %}>In Progress</option>
+      <option value="closed" {% if status_filter == 'closed' %}selected{% endif %}>Closed</option>
+    </select>
+    <select name="sort" class="cyber-select small">
+      <option value="cvss" {% if sort == 'cvss' %}selected{% endif %}>Sort: CVSS</option>
+      <option value="severity" {% if sort == 'severity' %}selected{% endif %}>Sort: Severity</option>
+      <option value="vuln_age" {% if sort == 'vuln_age' %}selected{% endif %}>Sort: Vuln Age</option>
+      <option value="updated" {% if sort == 'updated' %}selected{% endif %}>Sort: Updated</option>
+    </select>
+    <select name="order" class="cyber-select small">
+      <option value="desc" {% if order == 'desc' %}selected{% endif %}>Desc</option>
+      <option value="asc" {% if order == 'asc' %}selected{% endif %}>Asc</option>
+    </select>
+    <label class="cyber-select small" style="display:flex;align-items:center;gap:8px;border:none;padding:6px 10px;">
+      <input type="checkbox" name="only_new" value="1" {% if only_new %}checked{% endif %} />
+      only new
+    </label>
+    {% if scan_run %}<input type="hidden" name="scan_run" value="{{ scan_run }}" />{% endif %}
+    <button type="submit" class="cyber-button small" style="width:auto;">APPLY</button>
+    <a class="cyber-button small" style="width:auto;text-decoration:none;display:inline-block;" href="/">RESET</a>
+  </form>
+
+  <div class="vuln-list">
+    {% for f in findings %}
+    <div class="vuln-item {{ f.status }}">
+      <div class="vuln-card-head">
+        <div>
+          <span class="vuln-id">{{ f.cve_id }}</span>
+          <span class="vuln-cvss">CVSS: {{ f.cvss_score if f.cvss_score is not none else 'N/A' }}</span>
+        </div>
+        <div class="vuln-meta">
+          <span><i>&gt;_</i> {{ f.software_name }}</span>
+          <span><i>⚡</i> {{ (f.severity or 'unknown') | upper }}</span>
+          <span><i>⌛</i> Age: {% if f.vuln_age_days is not none %}{{ f.vuln_age_days }}d{% else %}N/A{% endif %}</span>
+        </div>
+      </div>
+      <pre class="vuln-raw">{{ f.raw_output or (f.title or '') }}</pre>
+      {% if f.comment %}
+      <div class="vuln-comment">// {{ f.comment }}</div>
+      {% endif %}
+      <form method="post" action="/finding/{{ f.id }}/update" class="vuln-actions" style="margin-top:12px;">
+        <input type="hidden" name="next" value="{% if query_string %}/?{{ query_string }}{% else %}/{% endif %}" />
+        <select name="status" class="cyber-select small">
+          <option value="new" {% if f.status == 'new' %}selected{% endif %}>NEW</option>
+          <option value="in_progress" {% if f.status == 'in_progress' %}selected{% endif %}>IN PROGRESS</option>
+          <option value="closed" {% if f.status == 'closed' %}selected{% endif %}>CLOSED</option>
+        </select>
+        <input type="text" name="comment" value="{{ f.comment or '' }}" class="cyber-input" placeholder="vulnm-1234" />
+        <button type="submit" class="cyber-button small" style="width:auto;">UPDATE</button>
+      </form>
+    </div>
+    {% else %}
+    <div style="text-align:center;padding:40px;opacity:.75;">No vulnerabilities for current filters.</div>
+    {% endfor %}
+  </div>
+</div>

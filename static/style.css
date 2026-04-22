@@ -338,6 +338,28 @@ body {
     font-size: 0.86rem;
 }
 
+.scan-progress-wrap {
+    position: relative;
+    height: 10px;
+    border: 1px solid rgba(0, 255, 213, 0.35);
+    background: rgba(0, 0, 0, 0.35);
+    margin-bottom: 8px;
+    overflow: hidden;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+}
+
+.scan-progress-wrap.active {
+    opacity: 1;
+}
+
+.scan-progress-bar {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, rgba(0, 255, 213, 0.55), rgba(57, 255, 140, 0.75));
+    transition: width 0.35s ease;
+}
+
 .small-line {
     color: var(--muted);
     font-size: 0.8rem;
