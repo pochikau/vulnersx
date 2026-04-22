@@ -115,9 +115,7 @@
               </select>
               <button type="submit" class="cyber-button">SCAN ALL SOFTWARE</button>
             </form>
-            <form method="post" action="/action/scan/stop">
-              <button type="submit" class="cyber-button btn-stop">STOP SCAN</button>
-            </form>
+            <button type="button" id="stop-scan-btn" class="cyber-button btn-stop">STOP SCAN</button>
             <p class="stat-label" style="margin-top:10px;opacity:.85;">После скана открывается вид «только новые» последнего прогона; для одиночного скана список справа фильтруется по этому ПО.</p>
             <div id="scan-live-new" class="scan-live-new"></div>
           </div>
@@ -165,6 +163,7 @@
       const progressWrapEl = document.getElementById("scan-progress-wrap");
       const progressBarEl = document.getElementById("scan-progress-bar");
       const progressTextEl = document.getElementById("scan-progress-text");
+      const stopBtnEl = document.getElementById("stop-scan-btn");
       let tick = null;
       let lastRunId = null;
       let wasRunning = false;
@@ -193,9 +192,13 @@
               await refreshRightPanel();
             }
             wasRunning = false;
+            stopBtnEl.disabled = true;
+            stopBtnEl.textContent = "STOP SCAN";
             return;
           }
           wasRunning = true;
+          stopBtnEl.disabled = false;
+          stopBtnEl.textContent = data.cancel_requested ? "STOP REQUESTED..." : "STOP SCAN";
           lastRunId = data.run_id;
           const total = Math.max(0, Number(data.total_software || 0));
           const processed = Math.max(0, Number(data.processed_software || 0));
@@ -226,6 +229,14 @@
           }
         } catch (_) {}
       }
+      stopBtnEl.addEventListener("click", async function () {
+        stopBtnEl.disabled = true;
+        stopBtnEl.textContent = "STOP REQUESTED...";
+        try {
+          await fetch("/api/scan/stop", { method: "POST", cache: "no-store" });
+        } catch (_) {}
+        await poll();
+      });
       tick = setInterval(poll, 1500);
       poll();
     })();

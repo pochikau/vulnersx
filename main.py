@@ -479,6 +479,24 @@ async def action_scan_stop() -> RedirectResponse:
     return RedirectResponse(url="/", status_code=303)
 
 
+@app.post("/api/scan/stop")
+async def api_scan_stop() -> JSONResponse:
+    with db.connect(DB_PATH) as conn:
+        running = conn.execute(
+            "SELECT id FROM scan_runs WHERE status = 'running' ORDER BY id DESC"
+        ).fetchall()
+        run_ids = [int(r["id"]) for r in running]
+        for rid in run_ids:
+            db.request_cancel_scan(conn, rid)
+    return JSONResponse(
+        {
+            "ok": True,
+            "cancel_requested": len(run_ids) > 0,
+            "run_ids": run_ids,
+        }
+    )
+
+
 @app.get("/api/scan/status")
 async def api_scan_status() -> JSONResponse:
     with db.connect(DB_PATH) as conn:
