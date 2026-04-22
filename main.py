@@ -40,6 +40,27 @@ scheduler: BackgroundScheduler | None = None
 SCAN_THREAD: threading.Thread | None = None
 
 
+def _cancel_requested(run_id: int) -> bool:
+    # Read cancel flag from a fresh DB connection so worker sees updates immediately.
+    with db.connect(DB_PATH) as conn:
+        return db.is_scan_cancel_requested(conn, run_id)
+
+
+def _finish_cancelled_run(conn: Any, run_id: int) -> None:
+    totals = conn.execute(
+        "SELECT findings_count, new_findings_count FROM scan_runs WHERE id = ?",
+        (run_id,),
+    ).fetchone()
+    db.finish_scan_run(
+        conn,
+        run_id,
+        "cancelled",
+        "scan cancelled by user",
+        int(totals["findings_count"]) if totals else 0,
+        int(totals["new_findings_count"]) if totals else 0,
+    )
+
+
 def _env_api_key() -> str | None:
     return os.environ.get("VULNX_API_KEY") or os.environ.get("PDCP_API_KEY")
 
@@ -73,15 +94,8 @@ def _scan_worker(run_id: int, software_ids: list[int], vuln_age_days: int) -> No
                 return
 
             for sw in software:
-                if db.is_scan_cancel_requested(conn, run_id):
-                    db.finish_scan_run(
-                        conn,
-                        run_id,
-                        "cancelled",
-                        "scan cancelled by user",
-                        int(conn.execute("SELECT findings_count FROM scan_runs WHERE id = ?", (run_id,)).fetchone()[0]),
-                        int(conn.execute("SELECT new_findings_count FROM scan_runs WHERE id = ?", (run_id,)).fetchone()[0]),
-                    )
+                if _cancel_requested(run_id):
+                    _finish_cancelled_run(conn, run_id)
                     return
 
                 db.set_scan_current_software(conn, run_id, sw.name)
@@ -89,9 +103,16 @@ def _scan_worker(run_id: int, software_ids: list[int], vuln_age_days: int) -> No
                 if serr:
                     err_note = err_note or serr
 
+                if _cancel_requested(run_id):
+                    _finish_cancelled_run(conn, run_id)
+                    return
+
                 hits_count = 0
                 new_hits_count = 0
                 for hit in hits:
+                    if _cancel_requested(run_id):
+                        _finish_cancelled_run(conn, run_id)
+                        return
                     hits_count += 1
                     kind = db.upsert_finding(
                         conn,
@@ -132,6 +153,8 @@ def _scan_worker(run_id: int, software_ids: list[int], vuln_age_days: int) -> No
                     findings_inc=hits_count,
                     new_findings_inc=new_hits_count,
                 )
+                # Persist frequently so cancellation and progress are immediately visible.
+                conn.commit()
 
             totals = conn.execute(
                 "SELECT findings_count, new_findings_count FROM scan_runs WHERE id = ?",
