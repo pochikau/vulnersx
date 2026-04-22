@@ -38,6 +38,7 @@ TEMPLATES = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 SCAN_LOCK = threading.Lock()
 scheduler: BackgroundScheduler | None = None
 SCAN_THREAD: threading.Thread | None = None
+CURRENT_SCAN_RUN_ID: int | None = None
 
 
 def _cancel_requested(run_id: int) -> bool:
@@ -83,79 +84,102 @@ def _configure_vulnx_auth() -> None:
 
 
 def _scan_worker(run_id: int, software_ids: list[int], vuln_age_days: int) -> None:
+    global CURRENT_SCAN_RUN_ID
+    CURRENT_SCAN_RUN_ID = run_id
     err_note: str | None = None
-    with SCAN_LOCK:
-        with db.connect(DB_PATH) as conn:
-            software_rows = [db.get_software_by_id(conn, sid) for sid in software_ids]
-            software = [s for s in software_rows if s is not None]
-            db.initialize_scan_progress(conn, run_id, len(software))
-            if not software:
-                db.finish_scan_run(conn, run_id, "failed", "empty software list", 0, 0)
-                return
-
-            for sw in software:
-                if _cancel_requested(run_id):
-                    _finish_cancelled_run(conn, run_id)
+    try:
+        with SCAN_LOCK:
+            with db.connect(DB_PATH) as conn:
+                software_rows = [db.get_software_by_id(conn, sid) for sid in software_ids]
+                software = [s for s in software_rows if s is not None]
+                db.initialize_scan_progress(conn, run_id, len(software))
+                if not software:
+                    db.finish_scan_run(conn, run_id, "failed", "empty software list", 0, 0)
                     return
 
-                db.set_scan_current_software(conn, run_id, sw.name)
-                hits, serr = run_search(sw.name, vuln_age_days)
-                if serr:
-                    err_note = err_note or serr
-
-                if _cancel_requested(run_id):
-                    _finish_cancelled_run(conn, run_id)
-                    return
-
-                hits_count = 0
-                new_hits_count = 0
-                for hit in hits:
+                for sw in software:
                     if _cancel_requested(run_id):
                         _finish_cancelled_run(conn, run_id)
                         return
-                    hits_count += 1
-                    kind = db.upsert_finding(
-                        conn,
-                        cve_id=hit.cve_id,
-                        software_id=sw.id,
-                        title=hit.title,
-                        severity=hit.severity,
-                        summary=hit.summary,
-                        raw_output=hit.raw_output,
-                        cvss_score=hit.cvss_score,
-                        epss_score=hit.epss_score,
-                        vuln_age_days=hit.vuln_age_days,
-                        severity_rank=hit.severity_rank,
-                        scan_run_id=run_id,
+
+                    db.set_scan_current_software(conn, run_id, sw.name)
+                    hits, serr = run_search(
+                        sw.name,
+                        vuln_age_days,
+                        cancel_check=lambda: _cancel_requested(run_id),
                     )
-                    is_new = kind == "inserted"
-                    if is_new:
-                        new_hits_count += 1
-                    fid = db.get_finding_id(conn, hit.cve_id, sw.id)
-                    db.append_scan_finding(
+                    if serr:
+                        if serr == "cancelled" or _cancel_requested(run_id):
+                            _finish_cancelled_run(conn, run_id)
+                            return
+                        err_note = err_note or serr
+
+                    if _cancel_requested(run_id):
+                        _finish_cancelled_run(conn, run_id)
+                        return
+
+                    hits_count = 0
+                    new_hits_count = 0
+                    for hit in hits:
+                        if _cancel_requested(run_id):
+                            _finish_cancelled_run(conn, run_id)
+                            return
+                        hits_count += 1
+                        kind = db.upsert_finding(
+                            conn,
+                            cve_id=hit.cve_id,
+                            software_id=sw.id,
+                            title=hit.title,
+                            severity=hit.severity,
+                            summary=hit.summary,
+                            raw_output=hit.raw_output,
+                            cvss_score=hit.cvss_score,
+                            epss_score=hit.epss_score,
+                            vuln_age_days=hit.vuln_age_days,
+                            severity_rank=hit.severity_rank,
+                            scan_run_id=run_id,
+                        )
+                        is_new = kind == "inserted"
+                        if is_new:
+                            new_hits_count += 1
+                        fid = db.get_finding_id(conn, hit.cve_id, sw.id)
+                        db.append_scan_finding(
+                            conn,
+                            scan_run_id=run_id,
+                            finding_id=fid,
+                            cve_id=hit.cve_id,
+                            software_name=sw.name,
+                            title=hit.title,
+                            severity=hit.severity,
+                            cvss_score=hit.cvss_score,
+                            epss_score=hit.epss_score,
+                            vuln_age_days=hit.vuln_age_days,
+                            raw_output=hit.raw_output,
+                            is_new=is_new,
+                        )
+                    db.increment_scan_progress(
                         conn,
-                        scan_run_id=run_id,
-                        finding_id=fid,
-                        cve_id=hit.cve_id,
-                        software_name=sw.name,
-                        title=hit.title,
-                        severity=hit.severity,
-                        cvss_score=hit.cvss_score,
-                        epss_score=hit.epss_score,
-                        vuln_age_days=hit.vuln_age_days,
-                        raw_output=hit.raw_output,
-                        is_new=is_new,
+                        run_id,
+                        processed_software_inc=1,
+                        findings_inc=hits_count,
+                        new_findings_inc=new_hits_count,
                     )
-                db.increment_scan_progress(
+                    conn.commit()
+
+                totals = conn.execute(
+                    "SELECT findings_count, new_findings_count FROM scan_runs WHERE id = ?",
+                    (run_id,),
+                ).fetchone()
+                db.finish_scan_run(
                     conn,
                     run_id,
-                    processed_software_inc=1,
-                    findings_inc=hits_count,
-                    new_findings_inc=new_hits_count,
+                    "completed",
+                    err_note,
+                    int(totals["findings_count"]) if totals else 0,
+                    int(totals["new_findings_count"]) if totals else 0,
                 )
-                # Persist frequently so cancellation and progress are immediately visible.
-                conn.commit()
-
+    except Exception as e:
+        with db.connect(DB_PATH) as conn:
             totals = conn.execute(
                 "SELECT findings_count, new_findings_count FROM scan_runs WHERE id = ?",
                 (run_id,),
@@ -163,11 +187,13 @@ def _scan_worker(run_id: int, software_ids: list[int], vuln_age_days: int) -> No
             db.finish_scan_run(
                 conn,
                 run_id,
-                "completed",
-                err_note,
+                "failed",
+                f"scan worker crashed: {e}",
                 int(totals["findings_count"]) if totals else 0,
                 int(totals["new_findings_count"]) if totals else 0,
             )
+    finally:
+        CURRENT_SCAN_RUN_ID = None
 
 
 def start_scan_async(vuln_age_days: int, software_ids: list[int]) -> tuple[int | None, str | None]:
@@ -222,6 +248,8 @@ async def lifespan(app: FastAPI):
     global scheduler
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     db.init_db(DB_PATH)
+    with db.connect(DB_PATH) as conn:
+        db.terminate_all_running_scans(conn, "server restarted while scan was running")
     _configure_vulnx_auth()
 
     scheduler = BackgroundScheduler()

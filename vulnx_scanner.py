@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
@@ -490,6 +491,7 @@ def run_search(
     vuln_age_days: int,
     *,
     timeout_sec: int = 600,
+    cancel_check: Any | None = None,
 ) -> tuple[list[VulnHit], str | None]:
     """
     Text-first search; falls back to JSON if text yields no CVE blocks.
@@ -499,45 +501,95 @@ def run_search(
     if api:
         env["PDCP_API_KEY"] = api
 
+    def _run_cmd(cmd: list[str]) -> tuple[int, str, str, str | None]:
+        """Run command with optional cooperative cancellation."""
+        if cancel_check is None:
+            try:
+                p = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_sec,
+                    env=env,
+                )
+                return p.returncode, p.stdout or "", p.stderr or "", None
+            except subprocess.TimeoutExpired:
+                return 124, "", "timeout", "timeout"
+            except FileNotFoundError:
+                return 127, "", "vulnx binary not found in PATH", "not_found"
+
+        try:
+            p = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+        except FileNotFoundError:
+            return 127, "", "vulnx binary not found in PATH", "not_found"
+
+        started = time.monotonic()
+        while True:
+            if cancel_check():
+                try:
+                    p.terminate()
+                    p.wait(timeout=3)
+                except Exception:
+                    try:
+                        p.kill()
+                    except Exception:
+                        pass
+                return 130, "", "cancelled", "cancelled"
+            if p.poll() is not None:
+                break
+            if (time.monotonic() - started) > timeout_sec:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+                return 124, "", "timeout", "timeout"
+            time.sleep(0.2)
+
+        out, err_local = p.communicate()
+        return p.returncode, out or "", err_local or "", None
+
     cmd_text = build_search_cmd_text(software, vuln_age_days)
     try:
-        proc = subprocess.run(
-            cmd_text,
-            capture_output=True,
-            text=True,
-            timeout=timeout_sec,
-            env=env,
-        )
-    except subprocess.TimeoutExpired:
+        rc, stdout, stderr, rerr = _run_cmd(cmd_text)
+    except Exception as e:
+        return [], f"search runner error: {e}"
+
+    if rerr == "cancelled":
+        return [], "cancelled"
+    if rerr == "timeout":
         return [], "timeout"
-    except FileNotFoundError:
+    if rerr == "not_found":
         return [], "vulnx binary not found in PATH"
 
-    err = proc.stderr.strip() if proc.stderr else ""
-    if proc.returncode != 0:
-        msg = err or proc.stdout.strip() or f"exit {proc.returncode}"
+    err = stderr.strip() if stderr else ""
+    if rc != 0:
+        msg = err or (stdout.strip() if stdout else "") or f"exit {rc}"
         return [], msg
 
-    out = parse_text_hits(proc.stdout or "")
+    out = parse_text_hits(stdout or "")
     if out:
         return out, (err if err else None)
 
     cmd_json = build_search_cmd_json(software, vuln_age_days)
     try:
-        proc2 = subprocess.run(
-            cmd_json,
-            capture_output=True,
-            text=True,
-            timeout=timeout_sec,
-            env=env,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+        rc2, stdout2, stderr2, rerr2 = _run_cmd(cmd_json)
+    except Exception:
         return [], err or "fallback json failed"
 
-    if proc2.returncode != 0:
-        return [], err or proc2.stderr.strip() or "json search failed"
+    if rerr2 == "cancelled":
+        return [], "cancelled"
+    if rerr2 in ("timeout", "not_found"):
+        return [], err or "fallback json failed"
+    if rc2 != 0:
+        return [], err or stderr2.strip() or "json search failed"
 
-    hits = parse_vulnx_json(proc2.stdout or "")
+    hits = parse_vulnx_json(stdout2 or "")
     return hits, (err if err else None)
 
 

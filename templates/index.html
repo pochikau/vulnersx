@@ -203,7 +203,11 @@
           const pct = Math.min(100, Math.max(2, rawPct));
           progressWrapEl.classList.add("active");
           progressBarEl.style.width = `${pct}%`;
-          progressTextEl.textContent = `Progress: ${processed}/${total} (${pct}%)`;
+          if (total === 0) {
+            progressTextEl.textContent = "Progress: initializing scan...";
+          } else {
+            progressTextEl.textContent = `Progress: ${processed}/${total} (${pct}%)`;
+          }
           statusEl.innerHTML = `
             <div><strong>RUNNING</strong> #${data.run_id}</div>
             <div class="small-line">ПО: ${data.processed_software} / ${data.total_software}</div>

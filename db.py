@@ -308,6 +308,18 @@ def get_running_scan(conn: sqlite3.Connection) -> sqlite3.Row | None:
     ).fetchone()
 
 
+def terminate_all_running_scans(conn: sqlite3.Connection, reason: str) -> None:
+    now = utc_now_iso()
+    conn.execute(
+        """
+        UPDATE scan_runs
+        SET status = 'failed', completed_at = ?, error = ?
+        WHERE status = 'running'
+        """,
+        (now, reason),
+    )
+
+
 def finish_scan_run(
     conn: sqlite3.Connection,
     run_id: int,
