@@ -19,6 +19,8 @@ from typing import Any
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from authlib.integrations.starlette_client import OAuth
+from starlette.middleware.sessions import SessionMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -41,6 +43,7 @@ SCAN_THREAD: threading.Thread | None = None
 CURRENT_SCAN_RUN_ID: int | None = None
 _CANCEL_LOCK = threading.Lock()
 _CANCEL_REQUESTED_RUNS: set[int] = set()
+oauth = OAuth()
 
 
 def _cancel_requested(run_id: int) -> bool:
@@ -72,6 +75,34 @@ def _finish_cancelled_run(conn: Any, run_id: int) -> None:
 
 def _env_api_key() -> str | None:
     return os.environ.get("VULNX_API_KEY") or os.environ.get("PDCP_API_KEY")
+
+
+def _is_keycloak_enabled() -> bool:
+    return bool(
+        os.environ.get("KEYCLOAK_SERVER_URL")
+        and os.environ.get("KEYCLOAK_REALM")
+        and os.environ.get("KEYCLOAK_CLIENT_ID")
+        and os.environ.get("KEYCLOAK_CLIENT_SECRET")
+    )
+
+
+def _keycloak_metadata_url() -> str:
+    base = os.environ.get("KEYCLOAK_SERVER_URL", "").rstrip("/")
+    realm = os.environ.get("KEYCLOAK_REALM", "").strip()
+    return f"{base}/realms/{realm}/.well-known/openid-configuration"
+
+
+def _public_base_url(request: Request) -> str:
+    env_url = (os.environ.get("PUBLIC_BASE_URL") or "").strip().rstrip("/")
+    if env_url:
+        return env_url
+    return str(request.base_url).rstrip("/")
+
+
+def _is_authenticated(request: Request) -> bool:
+    if not _is_keycloak_enabled():
+        return True
+    return bool(request.session.get("user"))
 
 
 def _configure_vulnx_auth() -> None:
@@ -261,6 +292,14 @@ async def lifespan(app: FastAPI):
     with db.connect(DB_PATH) as conn:
         db.terminate_all_running_scans(conn, "server restarted while scan was running")
     _configure_vulnx_auth()
+    if _is_keycloak_enabled():
+        oauth.register(
+            name="keycloak",
+            server_metadata_url=_keycloak_metadata_url(),
+            client_id=os.environ.get("KEYCLOAK_CLIENT_ID"),
+            client_secret=os.environ.get("KEYCLOAK_CLIENT_SECRET"),
+            client_kwargs={"scope": "openid profile email"},
+        )
 
     scheduler = BackgroundScheduler()
     apply_schedule()
@@ -273,11 +312,69 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Vulnx UI", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=os.environ.get("APP_SECRET_KEY", "change-me-in-prod"),
+    same_site="lax",
+    https_only=True,
+)
+
+
+@app.middleware("http")
+async def keycloak_auth_guard(request: Request, call_next):
+    if not _is_keycloak_enabled():
+        return await call_next(request)
+    path = request.url.path
+    allow = (
+        path.startswith("/static/")
+        or path == "/health"
+        or path.startswith("/auth/")
+    )
+    if allow or _is_authenticated(request):
+        return await call_next(request)
+    if path.startswith("/api/"):
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    return RedirectResponse(url="/auth/login", status_code=303)
 
 
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/auth/login")
+async def auth_login(request: Request) -> RedirectResponse:
+    if not _is_keycloak_enabled():
+        return RedirectResponse(url="/", status_code=303)
+    if _is_authenticated(request):
+        return RedirectResponse(url="/", status_code=303)
+    redirect_uri = f"{_public_base_url(request)}/auth/callback"
+    client = oauth.create_client("keycloak")
+    return await client.authorize_redirect(request, redirect_uri)
+
+
+@app.get("/auth/callback")
+async def auth_callback(request: Request) -> RedirectResponse:
+    if not _is_keycloak_enabled():
+        return RedirectResponse(url="/", status_code=303)
+    client = oauth.create_client("keycloak")
+    token = await client.authorize_access_token(request)
+    userinfo = token.get("userinfo")
+    if not userinfo:
+        userinfo = await client.userinfo(token=token)
+    request.session["user"] = {
+        "sub": userinfo.get("sub"),
+        "preferred_username": userinfo.get("preferred_username"),
+        "email": userinfo.get("email"),
+        "name": userinfo.get("name"),
+    }
+    return RedirectResponse(url="/", status_code=303)
+
+
+@app.get("/auth/logout")
+async def auth_logout(request: Request) -> RedirectResponse:
+    request.session.clear()
+    return RedirectResponse(url="/", status_code=303)
 
 
 def _parse_optional_int_param(value: str | None) -> int | None:
@@ -366,6 +463,8 @@ async def dashboard(
             "software_filter": software_id_int,
             "running_scan": running_scan,
             "query_string": query_string,
+            "auth_enabled": _is_keycloak_enabled(),
+            "auth_user": request.session.get("user"),
         },
     )
 

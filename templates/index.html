@@ -16,6 +16,10 @@
         <div class="status-item">SECURITY LEVEL: MAXIMUM</div>
         <div class="status-item">THREAT STATUS: <span id="threat-level" class="{{ threat_class }}">{{ threat_level }}</span></div>
         <div class="status-item">LAST SCAN: <span id="last-scan">{{ last_scan_label }}</span></div>
+        {% if auth_enabled %}
+        <div class="status-item">USER: {{ (auth_user.name or auth_user.preferred_username or auth_user.email) if auth_user else "unknown" }}</div>
+        <div class="status-item"><a href="/auth/logout">LOGOUT</a></div>
+        {% endif %}
       </div>
     </header>
 
