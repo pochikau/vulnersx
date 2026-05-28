@@ -39,10 +39,16 @@ SCAN_LOCK = threading.Lock()
 scheduler: BackgroundScheduler | None = None
 SCAN_THREAD: threading.Thread | None = None
 CURRENT_SCAN_RUN_ID: int | None = None
+_CANCEL_LOCK = threading.Lock()
+_CANCEL_REQUESTED_RUNS: set[int] = set()
 
 
 def _cancel_requested(run_id: int) -> bool:
-    # Read cancel flag from a fresh DB connection so worker sees updates immediately.
+    # Fast path: stop requests must work even while SQLite is busy.
+    with _CANCEL_LOCK:
+        if run_id in _CANCEL_REQUESTED_RUNS:
+            return True
+    # DB path: persisted stop request.
     with db.connect(DB_PATH) as conn:
         return db.is_scan_cancel_requested(conn, run_id)
 
@@ -60,6 +66,8 @@ def _finish_cancelled_run(conn: Any, run_id: int) -> None:
         int(totals["findings_count"]) if totals else 0,
         int(totals["new_findings_count"]) if totals else 0,
     )
+    with _CANCEL_LOCK:
+        _CANCEL_REQUESTED_RUNS.discard(run_id)
 
 
 def _env_api_key() -> str | None:
@@ -93,6 +101,7 @@ def _scan_worker(run_id: int, software_ids: list[int], vuln_age_days: int) -> No
                 software_rows = [db.get_software_by_id(conn, sid) for sid in software_ids]
                 software = [s for s in software_rows if s is not None]
                 db.initialize_scan_progress(conn, run_id, len(software))
+                conn.commit()
                 if not software:
                     db.finish_scan_run(conn, run_id, "failed", "empty software list", 0, 0)
                     return
@@ -103,6 +112,7 @@ def _scan_worker(run_id: int, software_ids: list[int], vuln_age_days: int) -> No
                         return
 
                     db.set_scan_current_software(conn, run_id, sw.name)
+                    conn.commit()
                     hits, serr = run_search(
                         sw.name,
                         vuln_age_days,
@@ -197,7 +207,7 @@ def _scan_worker(run_id: int, software_ids: list[int], vuln_age_days: int) -> No
 
 
 def start_scan_async(vuln_age_days: int, software_ids: list[int]) -> tuple[int | None, str | None]:
-    global SCAN_THREAD
+    global CURRENT_SCAN_RUN_ID, SCAN_THREAD
     with db.connect(DB_PATH) as conn:
         running = db.get_running_scan(conn)
         if running:
@@ -205,6 +215,10 @@ def start_scan_async(vuln_age_days: int, software_ids: list[int]) -> tuple[int |
         if not software_ids:
             return None, "Список ПО пуст — добавьте записи или загрузите файл."
         run_id = db.start_scan_run(conn, vuln_age_days)
+        db.initialize_scan_progress(conn, run_id, len(software_ids))
+    CURRENT_SCAN_RUN_ID = run_id
+    with _CANCEL_LOCK:
+        _CANCEL_REQUESTED_RUNS.discard(run_id)
     SCAN_THREAD = threading.Thread(
         target=_scan_worker,
         args=(run_id, software_ids, vuln_age_days),
@@ -472,27 +486,59 @@ async def software_delete(software_id: int) -> RedirectResponse:
 
 @app.post("/action/scan/stop")
 async def action_scan_stop() -> RedirectResponse:
-    with db.connect(DB_PATH) as conn:
-        running = db.get_running_scan(conn)
-        if running:
-            db.request_cancel_scan(conn, int(running["id"]))
+    run_ids: set[int] = set()
+    if CURRENT_SCAN_RUN_ID is not None:
+        run_ids.add(CURRENT_SCAN_RUN_ID)
+    with _CANCEL_LOCK:
+        _CANCEL_REQUESTED_RUNS.update(run_ids)
+    try:
+        with db.connect(DB_PATH, timeout=1) as conn:
+            running = conn.execute(
+                "SELECT id FROM scan_runs WHERE status = 'running' ORDER BY id DESC"
+            ).fetchall()
+            run_ids.update(int(r["id"]) for r in running)
+            with _CANCEL_LOCK:
+                _CANCEL_REQUESTED_RUNS.update(run_ids)
+            for rid in run_ids:
+                try:
+                    db.request_cancel_scan(conn, rid)
+                except Exception:
+                    pass
+    except Exception:
+        pass
     return RedirectResponse(url="/", status_code=303)
 
 
 @app.post("/api/scan/stop")
 async def api_scan_stop() -> JSONResponse:
-    with db.connect(DB_PATH) as conn:
-        running = conn.execute(
-            "SELECT id FROM scan_runs WHERE status = 'running' ORDER BY id DESC"
-        ).fetchall()
-        run_ids = [int(r["id"]) for r in running]
-        for rid in run_ids:
-            db.request_cancel_scan(conn, rid)
+    run_ids: set[int] = set()
+    db_errors: list[str] = []
+    if CURRENT_SCAN_RUN_ID is not None:
+        run_ids.add(CURRENT_SCAN_RUN_ID)
+    with _CANCEL_LOCK:
+        _CANCEL_REQUESTED_RUNS.update(run_ids)
+    try:
+        with db.connect(DB_PATH, timeout=1) as conn:
+            running = conn.execute(
+                "SELECT id FROM scan_runs WHERE status = 'running' ORDER BY id DESC"
+            ).fetchall()
+            run_ids.update(int(r["id"]) for r in running)
+            with _CANCEL_LOCK:
+                _CANCEL_REQUESTED_RUNS.update(run_ids)
+            for rid in run_ids:
+                try:
+                    db.request_cancel_scan(conn, rid)
+                except Exception as e:
+                    db_errors.append(f"{rid}: {e}")
+    except Exception as e:
+        db_errors.append(str(e))
     return JSONResponse(
         {
             "ok": True,
             "cancel_requested": len(run_ids) > 0,
-            "run_ids": run_ids,
+            "run_ids": sorted(run_ids),
+            "db_persisted": len(db_errors) == 0,
+            "db_errors": db_errors[:3],
         }
     )
 
